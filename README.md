@@ -2,64 +2,127 @@
 
 Aggregate predictive features for genetic variants from multiple sources into a unified SQLite database.
 
-## Data Sources
+**Part of the Variant Interpretation Pipeline** — see [PIPELINE.md](PIPELINE.md) for end-to-end workflow.
 
-| Source | Features | URL |
-|--------|----------|-----|
-| **AlphaMissense** | Pathogenicity scores from DeepMind | [alphafold.ebi.ac.uk](https://alphafold.ebi.ac.uk/download) |
-| **REVEL** | Ensemble method for missense variants | [sites.google.com/site/revelgenomics](https://sites.google.com/site/revelgenomics/) |
-| **CADD** | Combined Annotation Dependent Depletion | [cadd.gs.washington.edu](https://cadd.gs.washington.edu/) |
-| **ClinVar** | Clinical significance annotations | [ncbi.nlm.nih.gov/clinvar](https://www.ncbi.nlm.nih.gov/clinvar/) |
-| **gnomAD** | Population allele frequencies | [gnomad.broadinstitute.org](https://gnomad.broadinstitute.org/) |
+## Target Scale
+
+- **Phase 1**: Cardiac channelopathies (KCNH2, KCNQ1, SCN5A, RYR2)
+- **Phase 2**: ACMG SF v3.2 — 81 genes for secondary findings
+
+## Variant Types
+
+### Missense Variants
+| Source | Features |
+|--------|----------|
+| **AlphaMissense** | Pathogenicity score, class |
+| **REVEL** | Ensemble missense score |
+| **CADD** | PHRED + raw scores |
+| **ClinVar** | Classification, review status, stars |
+| **gnomAD** | AF, AF_popmax, homozygotes |
+
+### LOF Variants (Nonsense, Frameshift, Splice)
+| Source | Features |
+|--------|----------|
+| **gnomAD** | pLI, LOEUF (gene-level constraint) |
+| **LOFTEE** | Confidence (HC/LC), flags |
+| **NMD** | Escape prediction |
+| **ClinVar** | Classification, review status |
+| **Position** | Truncation position (% protein remaining) |
 
 ## Schema
 
 ```sql
-CREATE TABLE variants (
-    id INTEGER PRIMARY KEY,
+-- Missense variants
+CREATE TABLE variants_missense (
     gene TEXT NOT NULL,
-    hgvs_p TEXT,           -- e.g., p.Arg528His
-    hgvs_c TEXT,           -- e.g., c.1583G>A
+    hgvs_p TEXT,                 -- p.Arg528His
+    hgvs_c TEXT,                 -- c.1583G>A
     chromosome TEXT,
     position INTEGER,
-    ref TEXT,
-    alt TEXT,
+    ref TEXT, alt TEXT,
+    genome_build TEXT DEFAULT 'GRCh38',
+    transcript_id TEXT,          -- NM_ accession
     
     -- Scores
     alphamissense_score REAL,
-    alphamissense_class TEXT,  -- likely_benign, ambiguous, likely_pathogenic
+    alphamissense_class TEXT,
     revel_score REAL,
     cadd_phred REAL,
-    cadd_raw REAL,
     
     -- ClinVar
-    clinvar_id INTEGER,
     clinvar_significance TEXT,
-    clinvar_review_status TEXT,
-    clinvar_last_evaluated DATE,
+    clinvar_stars INTEGER,
     
     -- gnomAD
-    gnomad_af REAL,        -- global allele frequency
-    gnomad_af_popmax REAL, -- max population AF
-    gnomad_homozygotes INTEGER,
+    gnomad_af REAL,
+    gnomad_af_popmax REAL,
     
-    UNIQUE(gene, hgvs_p)
+    UNIQUE(gene, hgvs_p),
+    UNIQUE(chromosome, position, ref, alt, genome_build)
 );
 
-CREATE INDEX idx_gene ON variants(gene);
-CREATE INDEX idx_clinvar ON variants(clinvar_significance);
-CREATE INDEX idx_gnomad_af ON variants(gnomad_af);
+-- LOF variants
+CREATE TABLE variants_lof (
+    gene TEXT NOT NULL,
+    hgvs_p TEXT,                 -- p.Arg528Ter
+    hgvs_c TEXT,
+    lof_type TEXT NOT NULL,      -- nonsense, frameshift, splice_donor, splice_acceptor
+    
+    -- LOF-specific
+    loftee_confidence TEXT,      -- HC, LC
+    nmd_escape INTEGER,
+    truncation_position REAL,    -- Fraction of protein remaining
+    gene_pli REAL,
+    gene_loeuf REAL,
+    
+    -- ClinVar + gnomAD (same as missense)
+    ...
+    
+    UNIQUE(gene, hgvs_c)
+);
+
+-- Gene-level annotations
+CREATE TABLE genes (
+    symbol TEXT NOT NULL UNIQUE,
+    pli REAL,
+    loeuf REAL,
+    canonical_transcript TEXT
+);
+
+-- Penetrance estimates (from BayesianPenetranceEstimator)
+CREATE TABLE penetrance_estimates (
+    variant_type TEXT,           -- missense, lof
+    variant_id INTEGER,
+    gene TEXT,
+    penetrance_mean REAL,
+    penetrance_median REAL,
+    ci_lower REAL,
+    ci_upper REAL
+);
 ```
 
 ## Usage
 
 ```bash
-# Fetch and build database
-python -m variantfeatures build --genes KCNH2,KCNQ1,SCN5A
+# Build database for a gene
+python -m variantfeatures build --gene KCNH2
 
-# Query
-python -m variantfeatures query --gene KCNH2 --format csv > kcnh2_features.csv
+# Query missense variants
+python -m variantfeatures query --gene KCNH2 --type missense --format csv
+
+# Query LOF variants
+python -m variantfeatures query --gene KCNH2 --type lof --format csv
 ```
+
+## Data Sources
+
+| Source | Method | Size |
+|--------|--------|------|
+| ClinVar | Bulk XML (monthly) | ~1GB |
+| gnomAD v4 | Hail MatrixTable or VCF | ~500GB |
+| AlphaMissense | TSV from GCS | ~4GB |
+| REVEL | TSV | ~10GB |
+| CADD | TSV (per-chromosome) | ~80GB |
 
 ## Project Structure
 
@@ -67,21 +130,22 @@ python -m variantfeatures query --gene KCNH2 --format csv > kcnh2_features.csv
 variantfeatures/
 ├── __init__.py
 ├── cli.py              # Command-line interface
-├── database.py         # SQLite operations
+├── database.py         # SQLite operations (missense + LOF)
 ├── fetchers/
-│   ├── __init__.py
 │   ├── alphamissense.py
-│   ├── revel.py
-│   ├── cadd.py
 │   ├── clinvar.py
-│   └── gnomad.py
+│   ├── gnomad.py
+│   └── lof.py          # LOFTEE, NMD prediction
 └── utils.py
 ```
 
 ## Related Projects
 
-- [GeneVariantFetcher](https://github.com/kroncke-lab/GeneVariantFetcher) — Literature mining for variants
-- [BayesianPenetranceEstimator](https://github.com/kroncke-lab/BayesianPenetranceEstimator) — Penetrance modeling
+| Repo | Purpose |
+|------|---------|
+| [GeneVariantFetcher](https://github.com/kroncke-lab/GeneVariantFetcher) | Literature mining |
+| [BayesianPenetranceEstimator](https://github.com/kroncke-lab/BayesianPenetranceEstimator) | Penetrance modeling |
+| [Variant_Browser](https://github.com/kroncke-lab/Variant_Browser) | Clinical UI |
 
 ## License
 
