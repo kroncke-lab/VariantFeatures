@@ -17,13 +17,13 @@ GNOMAD_API = "https://gnomad.broadinstitute.org/api"
 RATE_LIMIT_DELAY = 0.5  # seconds between requests
 
 
-def _make_graphql_request(query: str, variables: Dict[str, Any]) -> Dict:
+def _make_graphql_request(query: str) -> Dict:
     """Make a GraphQL request to gnomAD API with rate limiting."""
     response = requests.post(
         GNOMAD_API,
-        json={"query": query, "variables": variables},
+        json={"query": query},
         headers={"Content-Type": "application/json"},
-        timeout=60
+        timeout=120
     )
     response.raise_for_status()
     
@@ -58,56 +58,38 @@ def fetch_gnomad(
             - gnomad_homozygotes: count of homozygotes
             - gnomad_an: allele number (coverage)
     """
-    # GraphQL query for gene variants
-    query = """
-    query GeneVariants($geneSymbol: String!, $dataset: DatasetId!, $referenceGenome: ReferenceGenomeId!) {
-      gene(gene_symbol: $geneSymbol, reference_genome: $referenceGenome) {
+    # Build query with inline values (gnomAD API prefers this)
+    query = f'''
+    {{
+      gene(gene_symbol: "{gene.upper()}", reference_genome: {reference_genome}) {{
         gene_id
         symbol
-        variants(dataset: $dataset) {
+        variants(dataset: {dataset}) {{
           variant_id
           hgvsc
           hgvsp
           consequence
-          exome {
+          exome {{
             ac
             an
             af
             homozygote_count
-            populations {
-              id
-              ac
-              an
-              af
-            }
-          }
-          genome {
+          }}
+          genome {{
             ac
             an
             af
             homozygote_count
-            populations {
-              id
-              ac
-              an
-              af
-            }
-          }
-        }
-      }
-    }
-    """
-    
-    variables = {
-        "geneSymbol": gene.upper(),
-        "dataset": dataset,
-        "referenceGenome": reference_genome,
-    }
+          }}
+        }}
+      }}
+    }}
+    '''
     
     print(f"Fetching gnomAD variants for {gene}...")
     
     try:
-        data = _make_graphql_request(query, variables)
+        data = _make_graphql_request(query)
     except Exception as e:
         print(f"  Error: {e}")
         return
@@ -130,20 +112,12 @@ def fetch_gnomad(
         an = exome.get("an") or genome.get("an")
         homozygotes = (exome.get("homozygote_count") or 0) + (genome.get("homozygote_count") or 0)
         
-        # Calculate popmax
-        af_popmax = 0.0
-        for pop_data in (exome.get("populations") or []) + (genome.get("populations") or []):
-            pop_af = pop_data.get("af")
-            if pop_af and pop_af > af_popmax:
-                af_popmax = pop_af
-        
         yield {
             "variant_id": var.get("variant_id"),
             "hgvs_p": var.get("hgvsp"),
             "hgvs_c": var.get("hgvsc"),
             "consequence": var.get("consequence"),
             "gnomad_af": af,
-            "gnomad_af_popmax": af_popmax if af_popmax > 0 else None,
             "gnomad_homozygotes": homozygotes,
             "gnomad_an": an,
         }
@@ -176,36 +150,30 @@ def fetch_single_variant(
     
     variant_id = f"{chrom}-{pos}-{ref}-{alt}"
     
-    query = """
-    query SingleVariant($variantId: String!, $dataset: DatasetId!, $referenceGenome: ReferenceGenomeId!) {
-      variant(variantId: $variantId, dataset: $dataset, referenceGenome: $referenceGenome) {
+    query = f'''
+    {{
+      variant(variantId: "{variant_id}", dataset: {dataset}, referenceGenome: {reference_genome}) {{
         variant_id
         hgvsc
         hgvsp
-        exome {
+        exome {{
           ac
           an
           af
           homozygote_count
-        }
-        genome {
+        }}
+        genome {{
           ac
           an
           af
           homozygote_count
-        }
-      }
-    }
-    """
-    
-    variables = {
-        "variantId": variant_id,
-        "dataset": dataset,
-        "referenceGenome": reference_genome,
-    }
+        }}
+      }}
+    }}
+    '''
     
     try:
-        data = _make_graphql_request(query, variables)
+        data = _make_graphql_request(query)
     except Exception as e:
         print(f"Error fetching {variant_id}: {e}")
         return None
@@ -230,14 +198,13 @@ def fetch_single_variant(
 if __name__ == "__main__":
     # Test with KCNH2
     import sys
+    import itertools
     gene = sys.argv[1] if len(sys.argv) > 1 else "KCNH2"
     
     print(f"Testing gnomAD fetcher for {gene}")
     
-    count = 0
-    for variant in fetch_gnomad(gene):
-        count += 1
-        if count <= 5:
-            print(f"  {variant['variant_id']}: AF={variant['gnomad_af']}, hgvs_p={variant['hgvs_p']}")
-    
-    print(f"\nTotal variants: {count}")
+    variants = list(itertools.islice(fetch_gnomad(gene), 10))
+    print(f"\nSample variants ({len(variants)} shown):")
+    for v in variants:
+        af_str = f"{v['gnomad_af']:.2e}" if v['gnomad_af'] else "N/A"
+        print(f"  {v['variant_id']}: AF={af_str}, hgvs_p={v['hgvs_p']}")
