@@ -59,39 +59,6 @@ sqlite3 data/variants.db "SELECT hgvs_p, gnomad_af FROM variants_missense WHERE 
 
 ---
 
-## ✅ Task 3: Fix CLI Build & Query Commands — COMPLETE
-
-**Status:** ✅ DONE
-
-**Objective** → Make CLI functional: `build` should call fetchers, `query` should work without errors.
-
-**Completed:**
-- Fixed CLI `query` command (was calling nonexistent `get_gene_variants`, now uses `get_gene_missense`)
-- Implemented CLI `build` command to call AlphaMissense and gnomAD fetchers
-- Added `stats` command for database coverage reporting
-- Added `export` command for CSV export
-- Added `__main__.py` for `python -m variantfeatures` support
-- Created `run_cli.py` wrapper for easier invocation
-
-**CLI Commands:**
-```bash
-# Stats
-/usr/bin/python3 run_cli.py stats
-
-# Query (table, csv, json)
-/usr/bin/python3 run_cli.py query -g KCNH2
-/usr/bin/python3 run_cli.py query -g KCNH2 --format csv
-/usr/bin/python3 run_cli.py query -g KCNH2 --format json
-
-# Export to file
-/usr/bin/python3 run_cli.py export -g KCNH2 -o data/exports/kcnh2.csv
-
-# Build (when data available)
-/usr/bin/python3 run_cli.py build -g KCNH2 --sources alphamissense,gnomad
-```
-
----
-
 ## Task 4: REVEL Score Integration
 
 **Status:** Not started
@@ -142,3 +109,38 @@ RYR2       376      376        0               0          0
 - Structural features (protein domains, AlphaFold pLDDT)
 - Expand to ACMG81 genes
 - Nextflow pipeline for batch processing
+
+---
+
+## Completed Tasks ✅
+
+### Task 3: Fix CLI Build & Query Commands — COMPLETE
+
+**Status:** ✅ DONE
+
+**Objective** → Make CLI functional: `build` should call fetchers, `query` should work without errors.
+
+**Completed:**
+- Fixed CLI `query` command (was calling nonexistent `get_gene_variants`, now uses `get_gene_missense`)
+- Implemented CLI `build` command to call AlphaMissense and gnomAD fetchers
+- Added `stats` command for database coverage reporting
+- Added `export` command for CSV export
+- Added `__main__.py` for `python -m variantfeatures` support
+- Created `run_cli.py` wrapper for easier invocation
+
+**CLI Commands:**
+```bash
+# Stats
+/usr/bin/python3 run_cli.py stats
+
+# Query (table, csv, json)
+/usr/bin/python3 run_cli.py query -g KCNH2
+/usr/bin/python3 run_cli.py query -g KCNH2 --format csv
+/usr/bin/python3 run_cli.py query -g KCNH2 --format json
+
+# Export to file
+/usr/bin/python3 run_cli.py export -g KCNH2 -o data/exports/kcnh2.csv
+
+# Build (when data available)
+/usr/bin/python3 run_cli.py build -g KCNH2 --sources alphamissense,gnomad
+```
