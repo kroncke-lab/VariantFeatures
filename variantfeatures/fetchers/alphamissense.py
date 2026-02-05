@@ -110,12 +110,13 @@ def fetch_alphamissense(
     with gzip.open(data_path, 'rt') as f:
         header = None
         for line in f:
+            # Skip comment lines (copyright notice)
             if line.startswith('#'):
-                # Parse header
-                header = line.strip('#').strip().split('\t')
                 continue
             
+            # First non-comment line is the header
             if header is None:
+                header = line.strip().split('\t')
                 continue
                 
             fields = line.strip().split('\t')
