@@ -109,7 +109,10 @@ def fetch_alphamissense(
     
     with gzip.open(data_path, 'rt') as f:
         header = None
-        for line in f:
+        for line_num, line in enumerate(f):
+            if line_num % 100000 == 0:
+                print(f"Processed {line_num} lines...", end='\r')
+            
             # Skip comment lines (copyright notice)
             if line.startswith('#'):
                 continue
@@ -217,8 +220,14 @@ if __name__ == '__main__':
     gene = sys.argv[1] if len(sys.argv) > 1 else "KCNH2"
     
     print(f"Testing AlphaMissense fetcher for {gene}")
-    variants = list(fetch_alphamissense(gene))
-    print(f"Found {len(variants)} variants")
+    # Only fetch first 10 to prove it works without scanning whole file
+    variants = []
+    for v in fetch_alphamissense(gene):
+        variants.append(v)
+        if len(variants) >= 10:
+            break
+            
+    print(f"\nFound {len(variants)}+ variants")
     
     if variants:
         print("\nSample variants:")
