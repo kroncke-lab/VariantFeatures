@@ -1,64 +1,108 @@
 # VariantFeatures
 
-## Objective
-Aggregate predictive features for genetic variants from multiple sources into a unified SQLite database.
+## Mission
+**Single command to build a complete variant annotation database for any gene.**
 
-## Current Status
+The goal is: `variantfeatures build --gene KCNH2` → SQLite database with all pathogenicity scores, population frequencies, structural features, and functional annotations ready for downstream analysis.
+
+## Current Status (Feb 2026)
 - **Phase 1 genes:** KCNH2, KCNQ1, SCN5A, RYR2 (cardiac channelopathies)
 - **Phase 2 target:** ACMG SF v3.2 — 81 genes for secondary findings
-- **Deadline:** June 2026 (R01 grant)
+- **Deadline:** June 2026 (R01 grant submission)
+
+### Data Sources Implemented
+| Source | Status | Data |
+|--------|--------|------|
+| AlphaMissense | ✅ Done | 1.1GB TSV, pathogenicity scores for all missense |
+| REVEL | ✅ Done | 6.1GB TSV, ensemble missense scores |
+| CADD | ✅ Done | REST API, deleteriousness scores |
+| ClinVar | ✅ Done | Classifications, review status |
+| gnomAD | ⚠️ Fetcher exists | Population frequencies via GraphQL |
+| AlphaFold | ❌ Planned | 3D structure, pLDDT confidence |
+
+### Current KCNH2 Coverage
+- 22,021 variants with AlphaMissense scores
+- 9,522 variants with REVEL scores
+- CADD: API-based lookup (on demand)
 
 ## Architecture
 ```
 VariantFeatures/
 ├── variantfeatures/
 │   ├── cli.py              # Command-line interface
-│   ├── database.py         # SQLite operations
+│   ├── database.py         # SQLite operations (upsert, query, export)
 │   └── fetchers/
-│       ├── alphamissense.py # AlphaMissense pathogenicity scores
-│       ├── clinvar.py       # ClinVar classifications
-│       ├── gnomad.py        # Population frequencies
-│       └── lof.py           # Loss-of-function annotations (LOFTEE, NMD)
+│       ├── alphamissense.py # AlphaMissense pathogenicity (TSV)
+│       ├── revel.py         # REVEL ensemble scores (TSV)
+│       ├── cadd.py          # CADD deleteriousness (REST API)
+│       ├── clinvar.py       # ClinVar classifications (XML)
+│       ├── gnomad.py        # Population frequencies (GraphQL)
+│       └── lof.py           # Loss-of-function annotations
 ├── scripts/
-│   └── load_clinvar.py     # Bulk ClinVar loading
-├── data/                   # Local data cache
-└── PIPELINE.md             # End-to-end workflow documentation
+│   └── load_kcnh2_scores.py # Example: populate KCNH2 scores
+├── data/
+│   ├── variants.db          # Main SQLite database
+│   ├── alphamissense/       # AlphaMissense TSV (~1.1GB)
+│   └── revel/               # REVEL data (~6.1GB uncompressed)
+└── PIPELINE.md              # End-to-end workflow
 ```
 
 ## Key Commands
 ```bash
-# Build database for a gene
-python -m variantfeatures build --gene KCNH2
-
 # Query variants
+python -m variantfeatures query --gene KCNH2
 python -m variantfeatures query --gene KCNH2 --format csv > kcnh2.csv
-python -m variantfeatures query --gene KCNH2 --format json > kcnh2.json
+
+# Database stats
+python -m variantfeatures stats
+
+# Export for downstream analysis
+python -m variantfeatures export --gene KCNH2 --output kcnh2_features.csv
 ```
 
-## Data Sources
-| Source | Method | Features |
-|--------|--------|----------|
-| AlphaMissense | TSV (~4GB) | Pathogenicity score, class |
-| ClinVar | Bulk XML | Classification, review status, stars |
-| gnomAD | GraphQL API | AF, AF_popmax, homozygotes |
-| REVEL | TSV | Ensemble missense score |
-| CADD | TSV | PHRED + raw scores |
+## Target Architecture (TODO)
+```bash
+# Future: single command builds everything
+variantfeatures build --gene BRCA1
+# → Looks up transcripts, coords
+# → Downloads/extracts AlphaMissense, REVEL scores
+# → Fetches CADD scores via API
+# → Fetches gnomAD frequencies
+# → Downloads AlphaFold structure
+# → Outputs unified SQLite + CSV
+```
 
-## Schema Overview
-- `variants_missense` - Missense variants with scores
-- `variants_lof` - Loss-of-function variants (nonsense, frameshift, splice)
-- `genes` - Gene-level annotations (pLI, LOEUF)
-- `penetrance_estimates` - From BayesianPenetranceEstimator
+## Database Schema
+```sql
+variants_missense:
+  - gene, hgvs_p, hgvs_c
+  - chromosome, position, ref, alt, genome_build
+  - alphamissense_score, alphamissense_class
+  - revel_score
+  - cadd_phred, cadd_raw
+  - clinvar_significance, clinvar_stars
+  - gnomad_af, gnomad_homozygotes
+  - alphafold_plddt, domain
+
+genes:
+  - symbol, ensembl_id, canonical_transcript
+  - pli, loeuf (constraint metrics)
+
+penetrance_estimates:
+  - variant linkage
+  - penetrance_mean, ci_lower, ci_upper
+  - model_version, n_carriers
+```
 
 ## Related Repos
-- **GeneVariantFetcher** - Upstream: literature-derived carriers/phenotypes
-- **BayesianPenetranceEstimator** - Downstream: uses features as model inputs
-- **Variant_Browser** - Downstream: displays aggregated features
+| Repo | Relationship |
+|------|-------------|
+| **GeneVariantFetcher** | Upstream — literature-mined carriers/phenotypes |
+| **BayesianPenetranceEstimator** | Downstream — uses features as model inputs |
+| **Variant_Browser** | Downstream — Django app displaying features |
 
-## Next Steps
-See TASKS.md for detailed task list. Priority:
-1. AlphaMissense integration
-2. gnomAD v4 integration
-3. Fix CLI build/query commands
-4. REVEL score integration
-5. Phase 1 gene validation
+## Contribution Notes
+- Python 3.11+ required
+- Large data files (AlphaMissense, REVEL) not in git — download on first use
+- Rate limit external APIs (gnomAD, CADD)
+- See TASKS.md for detailed work items
