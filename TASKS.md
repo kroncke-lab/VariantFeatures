@@ -1,5 +1,31 @@
 # Active Tasks
 
+## 🎯 TARGET ARCHITECTURE (per Brett, 2026-02-18)
+
+**Goal:** Single command to build complete gene database
+```bash
+variantfeatures build --gene KCNH2
+```
+
+**Should automatically:**
+1. Look up gene → get canonical transcript(s), UniProt ID, genomic coords
+2. Download/extract AlphaMissense scores for that gene
+3. Download/extract REVEL scores for that gene  
+4. Fetch gnomAD allele frequencies via API
+5. Download AlphaFold structure (AF2 or newer public version)
+6. Build SQLite database with all features linked
+
+**Data sources to integrate:**
+- [x] AlphaMissense (have 1.1GB file)
+- [x] REVEL (have 6.1GB file)
+- [ ] gnomAD v4 API (fetcher exists, needs wiring)
+- [ ] AlphaFold DB (https://alphafold.ebi.ac.uk/) — need fetcher
+- [ ] Gene metadata lookup (Ensembl/NCBI for transcripts, coords)
+
+**Current state:** Manual per-gene extraction. Need to build the orchestration layer.
+
+---
+
 ## ✅ Task 1: AlphaMissense Integration — FETCHER IMPLEMENTED
 
 **Status:** Fetcher implemented, needs data file download (~4GB)
