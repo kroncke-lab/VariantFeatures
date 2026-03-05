@@ -1,0 +1,29 @@
+Variant Annotation Pipeline
+
+1. Load, clean, transform, filter dataset
+    a. Retain variants per columns in dataset:
+        i. cohort_filter: Japan, Italy, France, Paris
+        ii. exclude_flag: Where not True
+    b. Label and retain only frameshift / nonsense / missense variants
+2. Initialize `hgvs` and `biopython` packages
+    a. Initialize `hgvs` package modules for remote database connection, notation mapping, variant parsing, and variant validation
+        i. Get transcript metadata, full transcript sequence for kcnh2
+        ii. Get coding sequence from full transcript sequence
+        iii. Define variant validation method
+    b. Initialize `biopython` package modules for codon and amino acid mappings
+        i. Get codon to amino acid mapping
+        ii. Determine all possible amino acid to codon mappings
+    c. Frameshift variant computation
+        i. Traverse left/right of reference amino acid codon to find codon where SNV results in a stop codon
+    d. Parse p. notation of variants
+    e. Get codon for reference and alternative (where present) amino acid
+    f. Determine all possible SNVs for reference amino acid codon
+        i. For nonsense variants: Check if stop codon is present in the list
+3. Variant notation conversion (backward: p -> c -> g)
+    a. Get all c. variant notations mapped to p. variant
+    b. Get all g. variant notations mapped to c. variants
+4. CADD (PHRED score)
+    a. Get all PHRED scores (as JSON) for g. variant notations using API at: https://cadd.gs.washington.edu/api
+    b. Compute aggregates for PHRED scores where more than one g. variants exist for a p. variant
+5. SpliceAI
+    a. Sample score (as JSON): https://spliceai-38-xwkwwwxdwq-uc.a.run.app/spliceai/?hg=38&variant=chr7-150958430-G-T
