@@ -78,6 +78,20 @@ def is_installed() -> bool:
     return bool(vep_bin())
 
 
+def _discover_cache_fasta(cache: Path, species: str, assembly: str) -> Optional[Path]:
+    """Find a packaged FASTA next to the species/assembly cache, if INSTALL.pl downloaded one."""
+    # Standard layout from `INSTALL.pl --AUTO cf`: ~/.vep/<species>/<release>_<assembly>/*.fa.gz
+    species_dir = cache / species
+    if not species_dir.exists():
+        return None
+    for sub in species_dir.iterdir():
+        if not sub.is_dir() or assembly not in sub.name:
+            continue
+        for cand in sub.glob("*.dna.toplevel.fa.gz"):
+            return cand
+    return None
+
+
 def _build_subprocess_env() -> dict:
     """Inherit current env, prepending the cpanm local-lib so Bio::DB::HTS loads.
 
@@ -228,7 +242,13 @@ def _invoke_vep(binary: str, vcf_path: Path, out_path: Path, *,
         "--force_overwrite",
         "--canonical",
         "--mane",
+        "--symbol",
+        "--hgvs",
     ]
+    # If a FASTA is present in the cache directory, use it for full HGVS notation.
+    fasta = _discover_cache_fasta(cache, species, assembly)
+    if fasta:
+        cmd += ["--fasta", str(fasta)]
     for plugin in plugins:
         cmd += ["--plugin", plugin]
     cmd += extra_args
