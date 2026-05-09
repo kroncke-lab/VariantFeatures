@@ -11,6 +11,10 @@ data/
 *.db
 *.sqlite
 
+# Licensed third-party tools
+annovar/
+annovar.latest.tar.gz
+
 # Environment
 .env
 .venv/
