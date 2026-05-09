@@ -55,6 +55,27 @@ _BUILTIN_GENE_TO_UNIPROT: dict[str, str] = {
     "APOB": "P04114",
     "PCSK9": "Q8NBP7",
     "BRAF": "P15056",  # for the test fixture
+    # ACMG SF v3.2 + amyloidosis / metabolic
+    "TTR": "P02766",     # transthyretin (familial amyloid polyneuropathy)
+    "ALPL": "P05186",    # tissue-nonspecific alkaline phosphatase (hypophosphatasia)
+    "RB1": "P06400",
+    "VHL": "P40337",
+    "ATP7B": "P35670",
+    "RYR1": "P21817",
+    "CACNA1S": "Q13698",
+    "SDHB": "P21912",
+    "SDHC": "Q99643",
+    "SDHD": "O14521",
+    "MEN1": "O00255",
+    "RET": "P07949",
+    "PTEN": "P60484",
+    "STK11": "Q15831",
+    "MUTYH": "Q9UIF7",
+    "MLH1": "P40692",
+    "MSH2": "P43246",
+    "MSH6": "P52701",
+    "PMS2": "P54278",
+    "APC": "P25054",
 }
 
 
