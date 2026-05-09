@@ -76,8 +76,9 @@ def vid(db) -> int:
 # Config helpers
 # ---------------------------------------------------------------------------
 
-def test_is_installed_when_no_binary(monkeypatch):
+def test_is_installed_when_no_binary(monkeypatch, tmp_path):
     monkeypatch.delenv("VEP_BIN", raising=False)
+    monkeypatch.setattr(vep.Path, "home", lambda: tmp_path)  # no ~/tools/ensembl-vep/vep
     with patch("variantfeatures.handlers.vep.shutil.which", return_value=None):
         assert vep.is_installed() is False
 
@@ -154,8 +155,9 @@ def test_pick_primary_csq_falls_back_to_canonical():
 # run_batch refuses to run when VEP isn't installed
 # ---------------------------------------------------------------------------
 
-def test_run_batch_no_binary_raises(db, monkeypatch):
+def test_run_batch_no_binary_raises(db, monkeypatch, tmp_path):
     monkeypatch.delenv("VEP_BIN", raising=False)
+    monkeypatch.setattr(vep.Path, "home", lambda: tmp_path)
     with patch("variantfeatures.handlers.vep.shutil.which", return_value=None):
         with pytest.raises(vep.HandlerError, match="VEP binary not found"):
             vep.run_batch(db)

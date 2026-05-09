@@ -54,7 +54,17 @@ class HandlerError(Exception):
 # ---------------------------------------------------------------------------
 
 def vep_bin() -> Optional[str]:
-    return os.environ.get("VEP_BIN") or shutil.which("vep")
+    """Locate the `vep` executable. Order: VEP_BIN > PATH > ~/tools/ensembl-vep/vep."""
+    env = os.environ.get("VEP_BIN")
+    if env and Path(env).exists():
+        return env
+    on_path = shutil.which("vep")
+    if on_path:
+        return on_path
+    fallback = Path.home() / "tools" / "ensembl-vep" / "vep"
+    if fallback.exists():
+        return str(fallback)
+    return None
 
 
 def vep_cache_dir() -> Path:
@@ -66,6 +76,22 @@ def vep_cache_dir() -> Path:
 
 def is_installed() -> bool:
     return bool(vep_bin())
+
+
+def _build_subprocess_env() -> dict:
+    """Inherit current env, prepending the cpanm local-lib so Bio::DB::HTS loads.
+
+    On macOS, `Bio::DB::HTS` typically has to be hand-built and installed to
+    `~/perl5` with `./Build install --install_base ~/perl5`. VEP needs it on
+    PERL5LIB to load the Tabix module. We prepend that directory if it exists.
+    """
+    env = os.environ.copy()
+    user_perl5 = Path.home() / "perl5" / "lib" / "perl5"
+    if user_perl5.exists():
+        existing = env.get("PERL5LIB")
+        path_str = str(user_perl5)
+        env["PERL5LIB"] = f"{path_str}:{existing}" if existing else path_str
+    return env
 
 
 def configured_plugins() -> list[str]:
@@ -207,7 +233,7 @@ def _invoke_vep(binary: str, vcf_path: Path, out_path: Path, *,
         cmd += ["--plugin", plugin]
     cmd += extra_args
 
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = subprocess.run(cmd, capture_output=True, text=True, env=_build_subprocess_env())
     if proc.returncode != 0:
         raise HandlerError(
             f"vep exited with code {proc.returncode}.\nstderr:\n{proc.stderr.strip()}"
