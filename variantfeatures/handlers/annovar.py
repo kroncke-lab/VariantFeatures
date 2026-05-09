@@ -153,7 +153,7 @@ def run_batch(
             continue
         for job in jobs_here:
             _persist_record(db, job["variant_id"], record)
-            db.mark_job_done(job["id"])
+            db.mark_job_done(job["job_id"])
             matched += 1
         seen_keys.add(key)
 
@@ -163,7 +163,7 @@ def run_batch(
         if key in seen_keys:
             continue
         for job in jobs_here:
-            db.mark_job_failed(job["id"], "no ANNOVAR multianno row for this variant")
+            db.mark_job_failed(job["job_id"], "no ANNOVAR multianno row for this variant")
             missing += 1
 
     if not keep_outputs:
@@ -246,15 +246,22 @@ def parse_multianno(path: str | Path) -> Iterable[dict]:
 
 def _normalize_record(row: dict) -> dict:
     """Pull the columns we know how to use into a canonical dict."""
+    # ANNOVAR's gene-table columns are named after the protocol used —
+    # `refGene`, `refGeneWithVer`, `ensGene`, `knownGene`, etc. Pick the first
+    # match by scanning the row's keys.
+    func = _first_present(row, "Func.refGene", "Func.refGeneWithVer", "Func.ensGene", "Func.knownGene")
+    exonic_func = _first_present(row, "ExonicFunc.refGene", "ExonicFunc.refGeneWithVer", "ExonicFunc.ensGene", "ExonicFunc.knownGene")
+    aa_change = _first_present(row, "AAChange.refGene", "AAChange.refGeneWithVer", "AAChange.ensGene", "AAChange.knownGene")
+    gene = _first_present(row, "Gene.refGene", "Gene.refGeneWithVer", "Gene.ensGene", "Gene.knownGene")
     return {
         "chromosome": row.get("Chr") or row.get("#Chr") or row.get("chrom"),
         "position": int(row.get("Start") or row.get("Pos") or 0),
         "ref": row.get("Ref"),
         "alt": row.get("Alt"),
-        "func_refgene": row.get("Func.refGene"),
-        "exonic_func_refgene": row.get("ExonicFunc.refGene"),
-        "aa_change_refgene": row.get("AAChange.refGene"),
-        "gene_refgene": row.get("Gene.refGene"),
+        "func_refgene": func,
+        "exonic_func_refgene": exonic_func,
+        "aa_change_refgene": aa_change,
+        "gene_refgene": gene,
         # gnomAD (column names depend on which gnomAD db was used)
         "gnomad_af": _f(row, "AF", "gnomad411_genome_AF", "gnomAD_genome_ALL", "gnomad_genome_AF"),
         "gnomad_af_popmax": _f(row, "AF_popmax", "gnomad411_genome_AF_popmax"),
@@ -287,6 +294,15 @@ def _f(row: dict, *keys: str) -> Optional[float]:
             return float(v)
         except (ValueError, TypeError):
             continue
+    return None
+
+
+def _first_present(row: dict, *keys: str) -> Optional[str]:
+    """Return the first key's value that's present and non-NA."""
+    for k in keys:
+        v = row.get(k)
+        if v not in (None, ".", "NA", "", "-"):
+            return v
     return None
 
 

@@ -407,11 +407,12 @@ def queue(source: str, gene: str, db: str):
     Useful when you've added a new annotator after enumerating variants. Idempotent —
     rows that already exist for (variant, source) are left alone.
     """
-    from .handlers import HANDLERS
+    from .handlers import HANDLERS, BATCH_HANDLERS
 
-    if source not in HANDLERS:
+    if source not in HANDLERS and source not in BATCH_HANDLERS:
         click.echo(f"Warning: no handler registered for source {source!r}.", err=True)
-        click.echo(f"Registered handlers: {', '.join(sorted(HANDLERS))}", err=True)
+        click.echo(f"Registered per-job handlers: {', '.join(sorted(HANDLERS))}", err=True)
+        click.echo(f"Registered batch handlers:   {', '.join(sorted(BATCH_HANDLERS))}", err=True)
         click.echo("Queueing anyway (you may have a custom handler).", err=True)
 
     vdb = VariantDB(Path(db) if db else None)

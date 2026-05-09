@@ -183,7 +183,7 @@ def run_batch(
                 continue
             for job in jobs_here:
                 _persist_record(db, job["variant_id"], record)
-                db.mark_job_done(job["id"])
+                db.mark_job_done(job["job_id"])
                 annotated += 1
             seen_keys.add(key)
 
@@ -192,7 +192,7 @@ def run_batch(
         if key in seen_keys:
             continue
         for job in jobs_here:
-            db.mark_job_failed(job["id"], "no VEP record returned for this variant")
+            db.mark_job_failed(job["job_id"], "no VEP record returned for this variant")
             missing += 1
 
     if not keep_outputs:
