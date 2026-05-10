@@ -506,6 +506,67 @@ def vep_run(db: str, limit: int, plugins: tuple, keep_outputs: bool):
                f"missing: {result['missing']}")
 
 
+@main.command(name="nmd-rule")
+@click.option("--gene", "-g", required=True, multiple=True,
+              help="Gene symbol; pass multiple for multiple genes")
+@click.option("--db", type=click.Path(), default=None, help="Database path")
+def nmd_rule_cmd(gene: tuple, db: str):
+    """Apply the last-exon + 50-nt-rule NMD trigger/escape classifier.
+
+    Writes one annotations_pathogenicity row per stop_gained variant with
+    predictor='nmd_rule', score 0.0 (escape) or 1.0 (triggers), and a category
+    string for which rule fired.
+    """
+    from .handlers import nmd_rules
+
+    vdb = VariantDB(Path(db) if db else None)
+    for sym in gene:
+        sym = sym.upper()
+        try:
+            result = nmd_rules.annotate_gene(vdb, sym)
+        except nmd_rules.HandlerError as e:
+            click.echo(f"{sym}: error - {e}", err=True)
+            continue
+        click.echo(f"{sym}: {result['considered']} stop_gained variants")
+        click.echo(f"  triggers NMD: {result['triggers']}    escapes: {result['escapes']}")
+        for cat, n in sorted(result["by_category"].items(), key=lambda x: -x[1]):
+            click.echo(f"    {cat:<32} {n}")
+
+
+@main.command(name="gene-constraint")
+@click.option("--gene", "-g", required=True, multiple=True,
+              help="Gene symbol; pass multiple times for multiple genes")
+@click.option("--db", type=click.Path(), default=None, help="Database path")
+def gene_constraint_cmd(gene: tuple, db: str):
+    """Pull gnomAD pLI / LOEUF / mis_z / o-e LoF for one or more genes.
+
+    Most predictive single feature for novel LoF variant interpretation.
+    Stored in gene_constraint, joinable via variant_consequences.gene_symbol.
+    """
+    from .handlers import gnomad_constraint
+
+    vdb = VariantDB(Path(db) if db else None)
+    for sym in gene:
+        sym = sym.upper()
+        try:
+            ok = gnomad_constraint.annotate_gene(vdb, sym)
+            if ok:
+                cur = vdb.conn.execute(
+                    "SELECT pli, oe_lof_upper, mis_z, obs_lof, exp_lof FROM gene_constraint WHERE gene_symbol = ?",
+                    [sym],
+                )
+                row = cur.fetchone()
+                if row:
+                    click.echo(
+                        f"{sym}: pLI={row['pli']:.3f}  LOEUF={row['oe_lof_upper']:.3f}  "
+                        f"mis_z={row['mis_z']:.2f}  obs_lof={row['obs_lof']}/{row['exp_lof']:.0f}"
+                    )
+            else:
+                click.echo(f"{sym}: no gnomAD constraint data available")
+        except gnomad_constraint.HandlerError as e:
+            click.echo(f"{sym}: error - {e}", err=True)
+
+
 @main.command()
 @click.option("--db", type=click.Path(), default=None, help="Database path")
 def jobs(db: str):

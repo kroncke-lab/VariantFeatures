@@ -308,6 +308,29 @@ CREATE TABLE IF NOT EXISTS annotations_conservation (
     PRIMARY KEY (variant_id, metric)
 );
 
+-- Gene-level constraint metrics from gnomAD (pLI, LOEUF, mis_z, etc.)
+-- One row per (gene_symbol, dataset) pair.
+CREATE TABLE IF NOT EXISTS gene_constraint (
+    gene_symbol TEXT NOT NULL,
+    dataset TEXT NOT NULL DEFAULT 'gnomad_v4',
+    pli REAL,                     -- probability of LoF intolerance (0-1)
+    lof_z REAL,                   -- LoF Z score
+    mis_z REAL,                   -- missense Z score
+    syn_z REAL,                   -- synonymous Z score
+    oe_lof REAL,                  -- observed/expected LoF
+    oe_lof_lower REAL,
+    oe_lof_upper REAL,            -- LOEUF (lower bound of CI on o/e LoF)
+    oe_mis REAL,
+    oe_mis_upper REAL,
+    exp_lof REAL,                 -- expected LoF count
+    obs_lof INTEGER,              -- observed LoF count in gnomAD
+    source TEXT,                  -- gnomad_api, etc.
+    fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (gene_symbol, dataset)
+);
+
+CREATE INDEX IF NOT EXISTS idx_gene_constraint_gene ON gene_constraint(gene_symbol);
+
 -- Splice-effect predictors (SpliceAI, dbscSNV, MaxEntScan)
 -- score_type is part of the PK because SpliceAI emits 4 directional scores per variant.
 CREATE TABLE IF NOT EXISTS annotations_splice (
@@ -780,6 +803,52 @@ class VariantDB:
             fetched_at = CURRENT_TIMESTAMP
         """
         self.conn.execute(sql, [variant_id, metric, score, rank_score, source])
+        self.conn.commit()
+
+    def upsert_gene_constraint(
+        self,
+        gene_symbol: str,
+        dataset: str = "gnomad_v4",
+        *,
+        pli: Optional[float] = None,
+        lof_z: Optional[float] = None,
+        mis_z: Optional[float] = None,
+        syn_z: Optional[float] = None,
+        oe_lof: Optional[float] = None,
+        oe_lof_lower: Optional[float] = None,
+        oe_lof_upper: Optional[float] = None,
+        oe_mis: Optional[float] = None,
+        oe_mis_upper: Optional[float] = None,
+        exp_lof: Optional[float] = None,
+        obs_lof: Optional[int] = None,
+        source: Optional[str] = None,
+    ) -> None:
+        sql = """
+        INSERT INTO gene_constraint
+            (gene_symbol, dataset, pli, lof_z, mis_z, syn_z,
+             oe_lof, oe_lof_lower, oe_lof_upper, oe_mis, oe_mis_upper,
+             exp_lof, obs_lof, source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(gene_symbol, dataset) DO UPDATE SET
+            pli = excluded.pli,
+            lof_z = excluded.lof_z,
+            mis_z = excluded.mis_z,
+            syn_z = excluded.syn_z,
+            oe_lof = excluded.oe_lof,
+            oe_lof_lower = excluded.oe_lof_lower,
+            oe_lof_upper = excluded.oe_lof_upper,
+            oe_mis = excluded.oe_mis,
+            oe_mis_upper = excluded.oe_mis_upper,
+            exp_lof = excluded.exp_lof,
+            obs_lof = excluded.obs_lof,
+            source = excluded.source,
+            fetched_at = CURRENT_TIMESTAMP
+        """
+        self.conn.execute(sql, [
+            gene_symbol, dataset, pli, lof_z, mis_z, syn_z,
+            oe_lof, oe_lof_lower, oe_lof_upper, oe_mis, oe_mis_upper,
+            exp_lof, obs_lof, source,
+        ])
         self.conn.commit()
 
     def upsert_splice(
