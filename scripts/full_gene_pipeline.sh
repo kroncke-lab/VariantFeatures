@@ -51,6 +51,23 @@ if [ "$SKIP_LOCAL" = "0" ]; then
             | grep -v urllib3 | grep -v NotOpenSSL | tail -2
 
     log "vep (cache + plugins, one batch)"
+    # Build VEP_PLUGINS spec from whatever data files are present.
+    AM_TSV="$PROJECT_ROOT/data/vep_plugins/AlphaMissense_hg38.tsv.gz"
+    LOFTEE_DIR="$HOME/tools/loftee"
+    LOFTEE_DATA="$PROJECT_ROOT/data/loftee_data"
+    BWAOB="$HOME/tools/bin/bigWigAverageOverBed"
+    PLUGINS=""
+    [ -f "$AM_TSV" ] && PLUGINS="${PLUGINS:+$PLUGINS;}AlphaMissense,file=$AM_TSV"
+    if [ -d "$LOFTEE_DIR" ] && [ -f "$LOFTEE_DATA/human_ancestor.fa.gz" ] && [ -f "$LOFTEE_DATA/gerp_conservation_scores.homo_sapiens.GRCh38.bw" ] && [ -x "$BWAOB" ]; then
+        PLUGINS="${PLUGINS:+$PLUGINS;}LoF,loftee_path:$LOFTEE_DIR,human_ancestor_fa:$LOFTEE_DATA/human_ancestor.fa.gz,gerp_bigwig:$LOFTEE_DATA/gerp_conservation_scores.homo_sapiens.GRCh38.bw,conservation_file:$LOFTEE_DATA/loftee.sql"
+    fi
+    [ -n "$PLUGINS" ] && export VEP_PLUGINS="$PLUGINS"
+    # Make sure VEP can find LoF.pm; LOFTEE's plugin lives in its own dir, so symlink to VEP's plugin dir.
+    [ -d "$LOFTEE_DIR" ] && [ ! -L "$HOME/.vep/Plugins/LoF.pm" ] && ln -sf "$LOFTEE_DIR/LoF.pm" "$HOME/.vep/Plugins/LoF.pm" 2>/dev/null
+    [ -d "$LOFTEE_DIR" ] && [ ! -L "$HOME/.vep/Plugins/ancestral.pm" ] && ln -sf "$LOFTEE_DIR/ancestral.pm" "$HOME/.vep/Plugins/ancestral.pm" 2>/dev/null
+    [ -d "$LOFTEE_DIR" ] && [ ! -L "$HOME/.vep/Plugins/context.pm" ] && ln -sf "$LOFTEE_DIR/context.pm" "$HOME/.vep/Plugins/context.pm" 2>/dev/null
+    # Add bigWigAverageOverBed dir to PATH so LOFTEE's gerp_dist.pl can find it.
+    [ -x "$BWAOB" ] && export PATH="$(dirname "$BWAOB"):$PATH"
     $PYTHON -m variantfeatures vep-run --db "$DB" 2>&1 | grep -v urllib3 | grep -v NotOpenSSL | tail -2
 else
     log "skip local annotators"
