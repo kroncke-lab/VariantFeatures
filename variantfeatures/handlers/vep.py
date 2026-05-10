@@ -381,6 +381,31 @@ def _persist_record(db, variant_id: int, record: dict) -> None:
             )
         break  # one transcript's worth of SpliceAI scores is enough per variant
 
+    # LOFTEE plugin: pull HC/LC/OS/NA call from transcript consequences. The most
+    # confident call wins (HC > LC ≈ OS > NA).
+    lof_calls = [c.get("lof") for c in transcript_csqs if isinstance(c, dict) and c.get("lof")]
+    if lof_calls:
+        rank = {"HC": 3, "LC": 2, "OS": 2, "NA": 1}
+        best = max(lof_calls, key=lambda v: rank.get(v, 0))
+        score = _LOFTEE_SCORES.get(best, 0.0)
+        db.upsert_pathogenicity(
+            variant_id, "loftee_lof",
+            score=score, category=best, source=SOURCE,
+        )
+        # Also record the filter reasons / flags as a category-suffix for the LC calls.
+        # We reuse the same predictor row's category field for the call itself; the
+        # detailed filter list goes into a separate predictor row for downstream analysis.
+        for c in transcript_csqs:
+            if not isinstance(c, dict):
+                continue
+            f = c.get("lof_filter")
+            if f and c.get("lof") == best:
+                db.upsert_pathogenicity(
+                    variant_id, "loftee_lof_filter",
+                    score=None, category=f, source=SOURCE,
+                )
+                break
+
     # Existing variation IDs (rsIDs etc.)
     for ev in record.get("colocated_variants") or []:
         if not isinstance(ev, dict):
@@ -406,9 +431,12 @@ _VEP_PLUGIN_PATHOGENICITY: list[tuple[str, str]] = [
     ("provean", "provean_score"),
     ("mutpred", "mutpred_score"),
     ("vest4", "vest4_score"),
-    # LOFTEE / constraint
-    ("loftee_lof", "lof"),  # 'HC' / 'LC' string -> won't pass numeric coercion, skipped
 ]
+
+
+# LOFTEE returns one of HC / LC / OS / NA in the `lof` field. Numeric mapping makes it
+# rankable alongside other predictors; the categorical label is preserved as `category`.
+_LOFTEE_SCORES = {"HC": 1.0, "LC": 0.5, "OS": 0.5, "NA": 0.0}
 
 
 def _pick_primary_csq(csqs: Iterable[dict]) -> Optional[dict]:
