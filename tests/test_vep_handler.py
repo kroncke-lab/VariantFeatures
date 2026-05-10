@@ -89,10 +89,12 @@ def test_vep_cache_dir_default(monkeypatch):
 
 
 def test_configured_plugins(monkeypatch):
-    monkeypatch.setenv("VEP_PLUGINS", "AlphaMissense,file=/x.tsv.gz, REVEL,file=/y.tsv.gz")
+    # Plugin args within one plugin are comma-separated, so we split on `;` between plugins.
+    monkeypatch.setenv("VEP_PLUGINS", "AlphaMissense,file=/x.tsv.gz; REVEL,file=/y.tsv.gz")
     out = vep.configured_plugins()
-    assert "AlphaMissense" in out[0]
-    assert any("REVEL" in p for p in out)
+    assert len(out) == 2
+    assert out[0] == "AlphaMissense,file=/x.tsv.gz"
+    assert out[1] == "REVEL,file=/y.tsv.gz"
 
 
 # ---------------------------------------------------------------------------

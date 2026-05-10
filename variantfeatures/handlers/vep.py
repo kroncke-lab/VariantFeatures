@@ -109,8 +109,14 @@ def _build_subprocess_env() -> dict:
 
 
 def configured_plugins() -> list[str]:
+    """Parse VEP_PLUGINS env into a list of `--plugin` args.
+
+    Use **semicolons between plugins** because each individual plugin's args
+    are themselves comma-separated (e.g. `AlphaMissense,file=/path/AM.tsv.gz`).
+    Whitespace around each entry is stripped.
+    """
     raw = os.environ.get("VEP_PLUGINS", "")
-    return [p for p in (s.strip() for s in raw.split(",")) if p]
+    return [p for p in (s.strip() for s in raw.split(";")) if p]
 
 
 # ---------------------------------------------------------------------------
@@ -312,13 +318,34 @@ def _persist_record(db, variant_id: int, record: dict) -> None:
         if score is not None:
             db.upsert_pathogenicity(variant_id, predictor, score=score, source=SOURCE)
 
-    # AlphaMissense plugin emits am_pathogenicity (score) + am_class (category).
-    am_scores = [c.get("am_pathogenicity") for c in transcript_csqs if isinstance(c, dict)]
-    am_classes = [c.get("am_class") for c in transcript_csqs if isinstance(c, dict)]
+    # AlphaMissense plugin (VEP_plugins >= 110) nests as alphamissense:{am_pathogenicity, am_class}.
+    # Older releases emit am_pathogenicity / am_class flat on the consequence. Support both.
+    def _am_score(c):
+        if not isinstance(c, dict):
+            return None
+        nested = c.get("alphamissense")
+        if isinstance(nested, dict):
+            return nested.get("am_pathogenicity")
+        return c.get("am_pathogenicity")
+
+    def _am_class(c):
+        if not isinstance(c, dict):
+            return None
+        nested = c.get("alphamissense")
+        if isinstance(nested, dict):
+            return nested.get("am_class")
+        return c.get("am_class")
+
+    am_scores = [_am_score(c) for c in transcript_csqs]
+    am_classes = [_am_class(c) for c in transcript_csqs]
     am_score = _max_numeric(am_scores)
     if am_score is not None:
         am_class = next((c for c in am_classes if isinstance(c, str)), None)
-        category = {"likely_benign": "B", "ambiguous": "A", "likely_pathogenic": "P"}.get(am_class, am_class)
+        category = {
+            "benign": "B", "likely_benign": "B",
+            "ambiguous": "A",
+            "pathogenic": "P", "likely_pathogenic": "P",
+        }.get(am_class, am_class)
         db.upsert_pathogenicity(variant_id, "alphamissense", score=am_score, category=category, source=SOURCE)
 
     # SpliceAI plugin emits a delta-score block per transcript. Take the first
