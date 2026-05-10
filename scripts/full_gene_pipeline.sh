@@ -68,5 +68,14 @@ else
     log "skip rest drains"
 fi
 
+# Gene-level + NMD-rule annotators (cheap, no flags to skip).
+log "gene-constraint (gnomAD pLI / LOEUF / mis_z)"
+$PYTHON -m variantfeatures gene-constraint -g "$GENE" --db "$DB" 2>&1 \
+    | grep -v urllib3 | grep -v NotOpenSSL | tail -2
+
+log "nmd-rule (last-exon + 50-nt rule for stop_gained)"
+$PYTHON -m variantfeatures nmd-rule -g "$GENE" --db "$DB" 2>&1 \
+    | grep -v urllib3 | grep -v NotOpenSSL | tail -5
+
 log "done. summary:"
 $PYTHON -m variantfeatures jobs --db "$DB" 2>&1 | tail -20 | grep -v urllib3 | grep -v NotOpenSSL
