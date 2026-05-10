@@ -253,6 +253,10 @@ def _normalize_record(row: dict) -> dict:
     exonic_func = _first_present(row, "ExonicFunc.refGene", "ExonicFunc.refGeneWithVer", "ExonicFunc.ensGene", "ExonicFunc.knownGene")
     aa_change = _first_present(row, "AAChange.refGene", "AAChange.refGeneWithVer", "AAChange.ensGene", "AAChange.knownGene")
     gene = _first_present(row, "Gene.refGene", "Gene.refGeneWithVer", "Gene.ensGene", "Gene.knownGene")
+    # gnomAD: detect which version's columns are present and pull per-pop AFs.
+    # We support v4.1 (`gnomad41_genome_*`), v4.0 (`gnomad40_*`), v2.1 (`gnomad211_*`),
+    # and the legacy ALL/AF column from older bundles.
+    gnomad_pops = _gnomad_per_pop_from_annovar(row)
     return {
         "chromosome": row.get("Chr") or row.get("#Chr") or row.get("chrom"),
         "position": int(row.get("Start") or row.get("Pos") or 0),
@@ -262,9 +266,14 @@ def _normalize_record(row: dict) -> dict:
         "exonic_func_refgene": exonic_func,
         "aa_change_refgene": aa_change,
         "gene_refgene": gene,
-        # gnomAD (column names depend on which gnomAD db was used)
-        "gnomad_af": _f(row, "AF", "gnomad411_genome_AF", "gnomAD_genome_ALL", "gnomad_genome_AF"),
-        "gnomad_af_popmax": _f(row, "AF_popmax", "gnomad411_genome_AF_popmax"),
+        # Legacy single-AF accessors (kept for backwards-compat with the old _persist_record path)
+        "gnomad_af": _f(row, "AF",
+                        "gnomad41_genome_AF", "gnomad40_genome_AF",
+                        "gnomad411_genome_AF", "gnomAD_genome_ALL", "gnomad_genome_AF"),
+        "gnomad_af_popmax": _f(row, "AF_popmax",
+                                "gnomad41_genome_AF_grpmax", "gnomad40_genome_AF_popmax",
+                                "gnomad411_genome_AF_popmax"),
+        "gnomad_pops": gnomad_pops,  # list of {dataset, pop, af} dicts
         # ClinVar
         "clinvar_clnsig": row.get("CLNSIG") or row.get("clinvar_20240611") or row.get("CLNSIG_clinvar"),
         "clinvar_clnrevstat": row.get("CLNREVSTAT") or row.get("clinvar_20240611_REVSTAT"),
@@ -282,6 +291,42 @@ def _normalize_record(row: dict) -> dict:
         "siphy": _f(row, "SiPhy_29way_logOdds"),
         "_raw": row,
     }
+
+
+# Population codes that gnomAD ships per-pop AFs for. `_grpmax`/`_popmax` is the
+# popmax frequency; we surface it as pop="popmax".
+_GNOMAD_POP_CODES = ("afr", "ami", "amr", "asj", "eas", "fin", "mid", "nfe", "sas", "remaining")
+
+
+def _gnomad_per_pop_from_annovar(row: dict) -> list[dict]:
+    """Detect ANNOVAR's gnomAD column scheme and pull a list of {dataset, pop, af} rows."""
+    candidates = [
+        ("gnomad41_genome", "gnomad41_genome"),
+        ("gnomad40_genome", "gnomad40_genome"),
+        ("gnomad41_exome",  "gnomad41_exome"),
+        ("gnomad40_exome",  "gnomad40_exome"),
+        ("gnomad211_genome", "gnomad211_genome"),
+        ("gnomad211_exome",  "gnomad211_exome"),
+    ]
+    out: list[dict] = []
+    for prefix, dataset in candidates:
+        # Skip if the schema isn't present in this row.
+        if f"{prefix}_AF" not in row:
+            continue
+        # Overall AF
+        all_af = _f(row, f"{prefix}_AF")
+        if all_af is not None:
+            out.append({"dataset": dataset, "pop": "all", "af": all_af})
+        # popmax / grpmax
+        popmax = _f(row, f"{prefix}_AF_grpmax", f"{prefix}_AF_popmax")
+        if popmax is not None:
+            out.append({"dataset": dataset, "pop": "popmax", "af": popmax})
+        # Per-population AFs
+        for pop in _GNOMAD_POP_CODES:
+            v = _f(row, f"{prefix}_AF_{pop}")
+            if v is not None:
+                out.append({"dataset": dataset, "pop": pop, "af": v})
+    return out
 
 
 def _f(row: dict, *keys: str) -> Optional[float]:
@@ -352,15 +397,22 @@ def _persist_record(db, variant_id: int, record: dict, *, source_label: str = SO
             db.upsert_conservation(variant_id, metric, score=score, source=source_label)
             wrote_any = True
 
-    # gnomAD population (popmax + all)
-    af = record.get("gnomad_af")
-    if af is not None:
-        db.upsert_population(variant_id, "gnomad_annovar", "all", af=af, source=source_label)
-        wrote_any = True
-    af_popmax = record.get("gnomad_af_popmax")
-    if af_popmax is not None:
-        db.upsert_population(variant_id, "gnomad_annovar", "popmax", af=af_popmax, source=source_label)
-        wrote_any = True
+    # gnomAD population: full per-pop breakdown if the gnomad41/gnomad40 schema
+    # is present; fall back to the single AF / popmax columns otherwise.
+    pops = record.get("gnomad_pops") or []
+    if pops:
+        for r in pops:
+            db.upsert_population(variant_id, r["dataset"], r["pop"], af=r["af"], source=source_label)
+            wrote_any = True
+    else:
+        af = record.get("gnomad_af")
+        if af is not None:
+            db.upsert_population(variant_id, "gnomad_annovar", "all", af=af, source=source_label)
+            wrote_any = True
+        af_popmax = record.get("gnomad_af_popmax")
+        if af_popmax is not None:
+            db.upsert_population(variant_id, "gnomad_annovar", "popmax", af=af_popmax, source=source_label)
+            wrote_any = True
 
     # ClinVar
     cln_sig = record.get("clinvar_clnsig")
