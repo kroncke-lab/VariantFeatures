@@ -17,12 +17,15 @@ variantfeatures build --gene KCNH2
 
 **Data sources to integrate:**
 - [x] AlphaMissense (have 1.1GB file)
-- [x] REVEL (have 6.1GB file)
-- [ ] gnomAD v4 API (fetcher exists, needs wiring)
-- [ ] AlphaFold DB (https://alphafold.ebi.ac.uk/) — need fetcher
-- [ ] Gene metadata lookup (Ensembl/NCBI for transcripts, coords)
+- [x] REVEL (local normalized batch handler)
+- [x] gnomAD v4 API (normalized handler wired through build)
+- [x] AlphaFold DB (https://alphafold.ebi.ac.uk/) — pLDDT fetcher/handler implemented
+- [x] Gene metadata lookup (Ensembl canonical/MANE transcript enumeration)
 
-**Current state:** Manual per-gene extraction. Need to build the orchestration layer.
+**Current state:** Normalized build/export layer is implemented. `build` now
+enumerates canonical variants into `variants` + `variant_consequences`, queues
+family-specific normalized annotations, and can run available annotators. `export`
+now defaults to normalized wide/long output with explicit feature-family prefixes.
 
 ---
 
@@ -85,16 +88,16 @@ sqlite3 data/variants.db "SELECT hgvs_p, gnomad_af FROM variants_missense WHERE 
 
 ---
 
-## Task 4: REVEL Score Integration
+## ✅ Task 4: REVEL Score Integration
 
-**Status:** Not started
+**Status:** ✅ DONE
 
 **Objective** → Create REVEL fetcher and populate `revel_score` for missense variants.
 
 **Success Measures** →
-- REVEL data downloaded/cached (or use per-variant lookup)
-- `fetch_revel(gene)` returns scores
-- Phase 1 genes have REVEL scores in DB
+- REVEL data downloaded/cached (or use per-variant lookup) ✅
+- `revel-run` drains queued normalized jobs from local REVEL file/zip ✅
+- Scores stored in `annotations_pathogenicity` as `predictor='revel'` ✅
 
 **Notes:**
 - REVEL scores available from: https://sites.google.com/site/revelgenomics/
@@ -130,11 +133,36 @@ RYR2       376      376        0               0          0
 
 ## Backlog
 
-- CADD score integration
-- LOF variant pipeline (LOFTEE, NMD prediction)
-- Structural features (protein domains, AlphaFold pLDDT)
+- CADD score integration hardening (direct normalized API handler exists; MyVariant/dbNSFP remains preferred for bulk)
+- LOF variant pipeline hardening (LOFTEE install/data checks; NMD-rule implemented, VEP NMD parsed)
+- Structural features beyond AlphaFold pLDDT (protein domains, disorder, solvent accessibility)
 - Expand to ACMG81 genes
 - Nextflow pipeline for batch processing
+
+## Normalized Build / Export Added
+
+**Status:** Implemented.
+
+- `variantfeatures build --gene KCNH2` is now the normalized canonical build path.
+- `--sources` accepts source groups such as `core`, `all`, `population`,
+  `splice`, `expression`, `structure`, `pathogenicity`, `pext`, `revel`, and `cadd`.
+- `--no-run` supports deterministic enumerate/queue-only builds.
+- `variantfeatures export` now defaults to normalized output.
+- `--layout wide` emits one row per variant with namespaced columns.
+- `--layout long` emits one row per feature field for auditing feature provenance.
+- `variantfeatures feature-schema` documents where pext, splice, population,
+  clinical, structure, conservation, pathogenicity, and gene-constraint features live.
+
+## Deferred Predictor Wiring Added
+
+**Status:** Implemented as first-class handlers/importers where external data remains large or model-specific.
+
+- `alphafold-run`: fetches AlphaFold DB confidence JSON and stores per-variant `alphafold_plddt` in `annotations_structure`.
+- VEP parser now persists SpliceAI overall/directional scores, dbscSNV ADA/RF, MaxEntScan scores, and VEP NMD plugin output.
+- `pext-import` / `pext-run`: imports local gnomAD pext CSV/TSV exports into `annotations_expression`.
+- `absplice-import`: imports AbSplice_DNA/RNA into `annotations_splice` and AbExp columns into `annotations_expression`.
+- `nmd-import`: imports coordinate-keyed NMDEP/NMDetective-style outputs into `annotations_pathogenicity`.
+- `vep-plugin-config`: prints a semicolon-separated `VEP_PLUGINS` string for SpliceAI, dbscSNV, MaxEntScan, LOFTEE, and NMD.
 
 ---
 

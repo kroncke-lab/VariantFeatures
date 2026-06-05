@@ -13,6 +13,7 @@ Public docs: https://docs.myvariant.info/
 
 from __future__ import annotations
 
+from datetime import date
 import json
 from typing import Any, Iterable, Optional
 
@@ -42,10 +43,14 @@ DBNSFP_FLAT_PREDICTORS: list[tuple[str, str]] = [
     ("clinpred", "clinpred"),
     ("eve", "eve"),
     ("esm1b", "esm1b"),
+    ("mvp", "mvp"),
+    ("mpc", "mpc"),
+    ("sift4g", "sift4g"),
+    ("lrt", "lrt"),
+    ("list-s2", "list_s2"),
+    ("bstatistic", "bstatistic"),
     ("dann", "dann"),
     ("deogen2", "deogen2"),
-    ("eigen", "eigen"),
-    ("eigen-pc", "eigen_pc"),
     ("fathmm-mkl", "fathmm_mkl"),
     ("fathmm-xf", "fathmm_xf"),
     ("genocanyon", "genocanyon"),
@@ -85,6 +90,46 @@ def fetch_myvariant(myvariant_id: str, *, assembly: str = "hg38", timeout: int =
     return data
 
 
+def fetch_myvariant_batch(
+    myvariant_ids: list[str],
+    *,
+    assembly: str = "hg38",
+    timeout: int = DEFAULT_TIMEOUT,
+) -> list[dict]:
+    """POST a batch of MyVariant IDs to the batch annotation endpoint."""
+    if not myvariant_ids:
+        return []
+    resp = requests.post(
+        MYVARIANT_BASE,
+        data={"ids": ",".join(myvariant_ids), "assembly": assembly},
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if not isinstance(data, list):
+        raise HandlerError("Unexpected MyVariant batch response shape")
+    return data
+
+
+def fetch_myvariant_batch_resilient(
+    myvariant_ids: list[str],
+    *,
+    assembly: str = "hg38",
+    timeout: int = DEFAULT_TIMEOUT,
+) -> list[dict]:
+    """Fetch a batch, recursively splitting chunks that trigger server errors."""
+    try:
+        return fetch_myvariant_batch(myvariant_ids, assembly=assembly, timeout=timeout)
+    except requests.RequestException as e:
+        if len(myvariant_ids) <= 1:
+            return [{"query": myvariant_ids[0], "_batch_error": str(e)}]
+        mid = len(myvariant_ids) // 2
+        return (
+            fetch_myvariant_batch_resilient(myvariant_ids[:mid], assembly=assembly, timeout=timeout)
+            + fetch_myvariant_batch_resilient(myvariant_ids[mid:], assembly=assembly, timeout=timeout)
+        )
+
+
 # ---------------------------------------------------------------------------
 # Parsers
 # ---------------------------------------------------------------------------
@@ -122,9 +167,15 @@ def _extract_score_triplet(node: Any) -> tuple[Optional[float], Optional[float],
     if not isinstance(node, dict):
         return None, None, None
     return (
-        _coerce_numeric(node.get("score")),
-        _coerce_numeric(node.get("rankscore")),
-        _coerce_category(node.get("pred")),
+        _coerce_numeric(node.get("score") if "score" in node else node.get("coding_score")),
+        _coerce_numeric(
+            node.get("rankscore")
+            if "rankscore" in node
+            else node.get("converted_rankscore")
+            if "converted_rankscore" in node
+            else node.get("coding_rankscore")
+        ),
+        _coerce_category(node.get("pred") if "pred" in node else node.get("coding_pred")),
     )
 
 
@@ -177,6 +228,47 @@ def parse_pathogenicity(payload: dict) -> Iterable[dict]:
         s, r, c = _extract_score_triplet(bd.get(sub_name))
         if s is not None or r is not None or c is not None:
             yield {"predictor": our_name, "score": s, "rank_score": r, "category": c}
+
+    # VARITY has four related score families.
+    varity = dbnsfp.get("varity") or {}
+    for sub_name, our_name in (
+        ("r", "varity_r"),
+        ("er", "varity_er"),
+        ("r_loo", "varity_r_loo"),
+        ("er_loo", "varity_er_loo"),
+    ):
+        s, r, c = _extract_score_triplet(varity.get(sub_name))
+        if s is not None or r is not None or c is not None:
+            yield {"predictor": our_name, "score": s, "rank_score": r, "category": c}
+
+    # Eigen/Eigen-PC and fitCons use predictor-specific field names.
+    eigen = dbnsfp.get("eigen") or {}
+    if isinstance(eigen, dict):
+        s = _coerce_numeric(eigen.get("raw_coding"))
+        if s is not None:
+            yield {
+                "predictor": "eigen_raw_coding",
+                "score": s,
+                "rank_score": _coerce_numeric(eigen.get("raw_coding_rankscore")),
+                "category": None,
+            }
+    eigen_pc = dbnsfp.get("eigen-pc") or {}
+    if isinstance(eigen_pc, dict):
+        s = _coerce_numeric(eigen_pc.get("raw_coding"))
+        if s is not None:
+            yield {
+                "predictor": "eigen_pc_raw_coding",
+                "score": s,
+                "rank_score": _coerce_numeric(eigen_pc.get("raw_coding_rankscore")),
+                "category": None,
+            }
+
+    fitcons = dbnsfp.get("fitcons") or {}
+    integrated = fitcons.get("integrated") if isinstance(fitcons, dict) else None
+    if isinstance(integrated, dict):
+        s, r, c = _extract_score_triplet(integrated)
+        if s is not None or r is not None or c is not None:
+            yield {"predictor": "integrated_fitcons", "score": s, "rank_score": r, "category": c}
 
 
 def parse_conservation(payload: dict) -> Iterable[dict]:
@@ -332,20 +424,20 @@ def parse_aliases(payload: dict) -> Iterable[dict]:
 # Persistence
 # ---------------------------------------------------------------------------
 
-def persist(db, variant_id: int, payload: dict) -> dict:
+def persist(db, variant_id: int, payload: dict, *, source_label: str = SOURCE) -> dict:
     """Write all parseable annotation rows from a MyVariant payload. Returns counts."""
     counts = {"pathogenicity": 0, "conservation": 0, "population": 0, "clinical": 0, "aliases": 0}
 
     for row in parse_pathogenicity(payload):
-        db.upsert_pathogenicity(variant_id, source=SOURCE, **row)
+        db.upsert_pathogenicity(variant_id, source=source_label, **row)
         counts["pathogenicity"] += 1
 
     for row in parse_conservation(payload):
-        db.upsert_conservation(variant_id, source=SOURCE, **row)
+        db.upsert_conservation(variant_id, source=source_label, **row)
         counts["conservation"] += 1
 
     for row in parse_population(payload):
-        db.upsert_population(variant_id, source=SOURCE, **row)
+        db.upsert_population(variant_id, source=source_label, **row)
         counts["population"] += 1
 
     for row in parse_clinical(payload):
@@ -354,7 +446,7 @@ def persist(db, variant_id: int, payload: dict) -> dict:
 
     aliases = list(parse_aliases(payload))
     if aliases:
-        counts["aliases"] = db.add_aliases(variant_id, aliases, source=SOURCE)
+        counts["aliases"] = db.add_aliases(variant_id, aliases, source=source_label)
 
     # Update canonical CA-ID on the variants row if we learned one (and it's not already set)
     clingen = payload.get("clingen") or {}
@@ -368,6 +460,248 @@ def persist(db, variant_id: int, payload: dict) -> dict:
             )
 
     return counts
+
+
+def run_batch(
+    db,
+    *,
+    limit: Optional[int] = None,
+    batch_size: int = 500,
+    source_label: Optional[str] = None,
+    timeout: int = DEFAULT_TIMEOUT,
+) -> dict:
+    """Drain pending MyVariant jobs through the POST batch endpoint."""
+    jobs = db.claim_pending_jobs(source=SOURCE, limit=limit if limit is not None else 1_000_000)
+    if not jobs:
+        return {"claimed": 0, "done": 0, "failed": 0, "notfound": 0, "batches": 0}
+
+    ids = [j["id"] for j in jobs]
+    placeholders = ",".join("?" * len(ids))
+    cur = db.conn.execute(
+        f"""
+        SELECT j.id AS job_id, j.variant_id AS variant_id,
+               v.chromosome AS chromosome, v.position AS position, v.ref AS ref, v.alt AS alt
+        FROM annotation_jobs j JOIN variants v ON v.id = j.variant_id
+        WHERE j.id IN ({placeholders})
+        """,
+        ids,
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+    source_label = source_label or f"myvariant_batch_hg38_{date.today().isoformat()}"
+
+    requests_to_make: list[dict] = []
+    failed = 0
+    for row in rows:
+        if len(row["ref"]) != 1 or len(row["alt"]) != 1:
+            db.mark_job_failed(row["job_id"], "myvariant batch handler currently only handles SNVs")
+            failed += 1
+            continue
+        try:
+            row["query"] = _myvariant_id(row["chromosome"], row["position"], row["ref"], row["alt"])
+        except HandlerError as e:
+            db.mark_job_failed(row["job_id"], str(e))
+            failed += 1
+            continue
+        requests_to_make.append(row)
+
+    done = 0
+    notfound = 0
+    batches = 0
+    for i in range(0, len(requests_to_make), batch_size):
+        chunk = requests_to_make[i : i + batch_size]
+        payloads = fetch_myvariant_batch_resilient([r["query"] for r in chunk], timeout=timeout)
+        by_query = {p.get("query") or p.get("_id"): p for p in payloads if isinstance(p, dict)}
+        found_payloads = []
+        done_job_ids = []
+        for row in chunk:
+            payload = by_query.get(row["query"])
+            if payload and payload.get("_batch_error"):
+                db.mark_job_failed(row["job_id"], payload["_batch_error"])
+                failed += 1
+                continue
+            if not payload or payload.get("notfound"):
+                done_job_ids.append(row["job_id"])
+                done += 1
+                notfound += 1
+                continue
+            found_payloads.append((row["variant_id"], payload))
+            done_job_ids.append(row["job_id"])
+            done += 1
+        _persist_many(db, found_payloads, source_label=source_label)
+        _mark_jobs_done_bulk(db, done_job_ids)
+        batches += 1
+
+    return {
+        "claimed": len(jobs),
+        "done": done,
+        "failed": failed,
+        "notfound": notfound,
+        "batches": batches,
+    }
+
+
+def _persist_many(db, items: list[tuple[int, dict]], *, source_label: str) -> None:
+    if not items:
+        return
+
+    pathogenicity_rows = []
+    conservation_rows = []
+    population_rows = []
+    clinical_rows = []
+    alias_rows = []
+    ca_updates = []
+
+    for variant_id, payload in items:
+        for row in parse_pathogenicity(payload):
+            pathogenicity_rows.append((
+                variant_id,
+                row["predictor"],
+                row.get("predictor_version") or "",
+                row.get("score"),
+                row.get("rank_score"),
+                row.get("category"),
+                source_label,
+            ))
+
+        for row in parse_conservation(payload):
+            conservation_rows.append((
+                variant_id,
+                row["metric"],
+                row.get("score"),
+                row.get("rank_score"),
+                source_label,
+            ))
+
+        for row in parse_population(payload):
+            population_rows.append((
+                variant_id,
+                row["dataset"],
+                row.get("pop") or "all",
+                row.get("af"),
+                row.get("ac"),
+                row.get("an"),
+                row.get("n_homozygotes"),
+                row.get("filter_status"),
+                source_label,
+            ))
+
+        for row in parse_clinical(payload):
+            clinical_rows.append((
+                variant_id,
+                row["source"],
+                row.get("record_id") or "",
+                row.get("classification"),
+                row.get("review_status"),
+                row.get("stars"),
+                row.get("last_evaluated"),
+                row.get("conditions"),
+            ))
+
+        for row in parse_aliases(payload):
+            alias_rows.append((variant_id, row["alias_type"], row["alias_value"], source_label))
+
+        caid = (payload.get("clingen") or {}).get("caid")
+        if caid:
+            ca_updates.append((caid, variant_id))
+
+    if pathogenicity_rows:
+        db.conn.executemany(
+            """
+            INSERT INTO annotations_pathogenicity
+                (variant_id, predictor, predictor_version, score, rank_score, category, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(variant_id, predictor, predictor_version) DO UPDATE SET
+                score = excluded.score,
+                rank_score = excluded.rank_score,
+                category = excluded.category,
+                source = excluded.source,
+                fetched_at = CURRENT_TIMESTAMP
+            """,
+            pathogenicity_rows,
+        )
+
+    if conservation_rows:
+        db.conn.executemany(
+            """
+            INSERT INTO annotations_conservation
+                (variant_id, metric, score, rank_score, source)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(variant_id, metric) DO UPDATE SET
+                score = excluded.score,
+                rank_score = excluded.rank_score,
+                source = excluded.source,
+                fetched_at = CURRENT_TIMESTAMP
+            """,
+            conservation_rows,
+        )
+
+    if population_rows:
+        db.conn.executemany(
+            """
+            INSERT INTO annotations_population
+                (variant_id, dataset, pop, af, ac, an, n_homozygotes, filter_status, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(variant_id, dataset, pop) DO UPDATE SET
+                af = excluded.af,
+                ac = excluded.ac,
+                an = excluded.an,
+                n_homozygotes = excluded.n_homozygotes,
+                filter_status = excluded.filter_status,
+                source = excluded.source,
+                fetched_at = CURRENT_TIMESTAMP
+            """,
+            population_rows,
+        )
+
+    if clinical_rows:
+        db.conn.executemany(
+            """
+            INSERT INTO annotations_clinical
+                (variant_id, source, record_id, classification, review_status, stars, last_evaluated, conditions)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(variant_id, source, record_id) DO UPDATE SET
+                classification = excluded.classification,
+                review_status = excluded.review_status,
+                stars = excluded.stars,
+                last_evaluated = excluded.last_evaluated,
+                conditions = excluded.conditions,
+                fetched_at = CURRENT_TIMESTAMP
+            """,
+            clinical_rows,
+        )
+
+    if alias_rows:
+        db.conn.executemany(
+            """
+            INSERT OR IGNORE INTO variant_aliases
+                (variant_id, alias_type, alias_value, source)
+            VALUES (?, ?, ?, ?)
+            """,
+            alias_rows,
+        )
+
+    for caid, variant_id in ca_updates:
+        db.conn.execute(
+            "UPDATE variants SET ca_id = COALESCE(ca_id, ?), updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            [caid, variant_id],
+        )
+
+    db.conn.commit()
+
+
+def _mark_jobs_done_bulk(db, job_ids: list[int]) -> None:
+    if not job_ids:
+        return
+    placeholders = ",".join("?" * len(job_ids))
+    db.conn.execute(
+        f"""
+        UPDATE annotation_jobs
+        SET status = 'done', error = NULL, updated_at = CURRENT_TIMESTAMP
+        WHERE id IN ({placeholders})
+        """,
+        job_ids,
+    )
+    db.conn.commit()
 
 
 def handle(db, variant_id: int, payload: Optional[str] = None, *, timeout: int = DEFAULT_TIMEOUT) -> None:

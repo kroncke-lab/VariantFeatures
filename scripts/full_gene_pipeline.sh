@@ -35,7 +35,7 @@ fi
 
 # Always ensure all working sources are queued (idempotent: existing rows are left alone).
 log "queue all sources"
-for source in alphamissense annovar vep clingen_ar myvariant; do
+for source in alphamissense alphafold annovar vep clingen_ar myvariant; do
     $PYTHON -m variantfeatures queue --source "$source" --gene "$GENE" --db "$DB" 2>&1 \
         | grep -v urllib3 | grep -v NotOpenSSL | grep -E "Queued|already" || true
 done
@@ -43,6 +43,9 @@ done
 if [ "$SKIP_LOCAL" = "0" ]; then
     log "alphamissense (single file pass)"
     $PYTHON -m variantfeatures alphamissense-run --db "$DB" 2>&1 | grep -v urllib3 | grep -v NotOpenSSL | tail -2
+
+    log "alphafold pLDDT (AlphaFold DB API)"
+    $PYTHON -m variantfeatures alphafold-run --db "$DB" 2>&1 | grep -v urllib3 | grep -v NotOpenSSL | tail -2
 
     log "annovar (refGene + clinvar in one batch)"
     ANNOVAR_HOME="$PROJECT_ROOT/annovar" ANNOVAR_DB="$PROJECT_ROOT/annovar/humandb" \
@@ -53,14 +56,23 @@ if [ "$SKIP_LOCAL" = "0" ]; then
     log "vep (cache + plugins, one batch)"
     # Build VEP_PLUGINS spec from whatever data files are present.
     AM_TSV="$PROJECT_ROOT/data/vep_plugins/AlphaMissense_hg38.tsv.gz"
+    SPLICEAI_SNV="$PROJECT_ROOT/data/vep_plugins/spliceai_scores.masked.snv.ensembl_mane.grch38.vcf.gz"
+    SPLICEAI_INDEL="$PROJECT_ROOT/data/vep_plugins/spliceai_scores.masked.indel.hg38.vcf.gz"
+    DBSCSNV="$PROJECT_ROOT/data/vep_plugins/dbscSNV1.1_GRCh38.txt.gz"
+    MAXENTSCAN_DIR="$HOME/tools/maxentscan/fordownload"
+    NMD_PLUGIN="$HOME/.vep/Plugins/NMD.pm"
     LOFTEE_DIR="$HOME/tools/loftee"
     LOFTEE_DATA="$PROJECT_ROOT/data/loftee_data"
     BWAOB="$HOME/tools/bin/bigWigAverageOverBed"
     PLUGINS=""
     [ -f "$AM_TSV" ] && PLUGINS="${PLUGINS:+$PLUGINS;}AlphaMissense,file=$AM_TSV"
+    [ -f "$SPLICEAI_SNV" ] && [ -f "$SPLICEAI_INDEL" ] && PLUGINS="${PLUGINS:+$PLUGINS;}SpliceAI,snv=$SPLICEAI_SNV,indel=$SPLICEAI_INDEL,split_output=1"
+    [ -f "$DBSCSNV" ] && PLUGINS="${PLUGINS:+$PLUGINS;}dbscSNV,$DBSCSNV,GRCh38"
+    [ -d "$MAXENTSCAN_DIR" ] && PLUGINS="${PLUGINS:+$PLUGINS;}MaxEntScan,$MAXENTSCAN_DIR,SWA,NCSS"
     if [ -d "$LOFTEE_DIR" ] && [ -f "$LOFTEE_DATA/human_ancestor.fa.gz" ] && [ -f "$LOFTEE_DATA/gerp_conservation_scores.homo_sapiens.GRCh38.bw" ] && [ -x "$BWAOB" ]; then
         PLUGINS="${PLUGINS:+$PLUGINS;}LoF,loftee_path:$LOFTEE_DIR,human_ancestor_fa:$LOFTEE_DATA/human_ancestor.fa.gz,gerp_bigwig:$LOFTEE_DATA/gerp_conservation_scores.homo_sapiens.GRCh38.bw,conservation_file:$LOFTEE_DATA/loftee.sql"
     fi
+    [ -f "$NMD_PLUGIN" ] && PLUGINS="${PLUGINS:+$PLUGINS;}NMD"
     [ -n "$PLUGINS" ] && export VEP_PLUGINS="$PLUGINS"
     # Make sure VEP can find LoF.pm; LOFTEE's plugin lives in its own dir, so symlink to VEP's plugin dir.
     [ -d "$LOFTEE_DIR" ] && [ ! -L "$HOME/.vep/Plugins/LoF.pm" ] && ln -sf "$LOFTEE_DIR/LoF.pm" "$HOME/.vep/Plugins/LoF.pm" 2>/dev/null

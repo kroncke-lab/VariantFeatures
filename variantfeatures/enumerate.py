@@ -64,10 +64,10 @@ TYPE_TO_CONSEQUENCES: dict[str, set[str]] = {
 # Per-source jobs (alphamissense, revel, ...) are also queued for missense so
 # higher-quality dedicated fetchers can refine values later.
 DEFAULT_SOURCES_BY_CONSEQUENCE: dict[str, tuple[str, ...]] = {
-    "missense_variant": ("clingen_ar", "myvariant", "gnomad", "alphamissense", "annovar", "vep"),
-    "stop_gained": ("clingen_ar", "myvariant", "gnomad", "annovar", "vep"),
-    "stop_lost": ("clingen_ar", "myvariant", "gnomad", "annovar", "vep"),
-    "start_lost": ("clingen_ar", "myvariant", "gnomad", "annovar", "vep"),
+    "missense_variant": ("clingen_ar", "myvariant", "gnomad", "alphamissense", "revel", "alphafold", "annovar", "vep"),
+    "stop_gained": ("clingen_ar", "myvariant", "gnomad", "alphafold", "annovar", "vep"),
+    "stop_lost": ("clingen_ar", "myvariant", "gnomad", "alphafold", "annovar", "vep"),
+    "start_lost": ("clingen_ar", "myvariant", "gnomad", "alphafold", "annovar", "vep"),
     "synonymous_variant": ("clingen_ar", "myvariant", "gnomad", "annovar", "vep"),
 }
 

@@ -8,7 +8,7 @@ sys.path.insert(0, '/mnt/temp2/kronckbm/gitrepos/VariantFeatures')
 
 from variantfeatures.fetchers.alphamissense import fetch_alphamissense
 
-def test_alphamissense(variant_str):
+def run_alphamissense_check(variant_str):
     """Test AlphaMissense for a specific variant."""
     
     # Parse variant string (KCNH2 G628S)
@@ -63,6 +63,6 @@ def test_alphamissense(variant_str):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        test_alphamissense("KCNH2 G628S")
+        run_alphamissense_check("KCNH2 G628S")
     else:
-        test_alphamissense(f"{sys.argv[1]} {sys.argv[2]}")
+        run_alphamissense_check(f"{sys.argv[1]} {sys.argv[2]}")

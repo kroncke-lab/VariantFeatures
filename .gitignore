@@ -10,6 +10,13 @@ build/
 data/
 *.db
 *.sqlite
+*.tbi
+*.vcf.gz
+# Internal collaborator handoff bundles (not needed to run the tool)
+handoff/
+
+# macOS
+.DS_Store
 
 # Licensed third-party tools
 annovar/

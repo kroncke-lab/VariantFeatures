@@ -1,0 +1,3 @@
+uniprot_id	var	am_pathogenicity	am_class
+Q12809	A123T	0.10	likely_benign
+Q12809	W100*	0.95	likely_pathogenic

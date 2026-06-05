@@ -15,7 +15,8 @@ Configure via:
 - `--protocols` / `--operations`: which ANNOVAR databases to call.
 
 Default protocols cover the same broad covariates we get from MyVariant.info,
-plus per-transcript consequence annotation (refGene/ensGene).
+plus per-transcript consequence annotation with transcript versions
+(`refGeneWithVer`).
 
 ANNOVAR site: https://annovar.openbioinformatics.org/
 """
@@ -37,7 +38,7 @@ SOURCE = "annovar"
 
 # Default protocols / operations. Conservative subset that's typically present in a
 # fresh ANNOVAR humandb install. Users with bigger dbs can pass custom values.
-DEFAULT_PROTOCOLS = "refGene,gnomad411_genome,clinvar_20240611,dbnsfp47a"
+DEFAULT_PROTOCOLS = "refGeneWithVer,gnomad411_genome,clinvar_20240611,dbnsfp47a"
 DEFAULT_OPERATIONS = "g,f,f,f"
 DEFAULT_BUILD = "hg38"
 
@@ -249,10 +250,10 @@ def _normalize_record(row: dict) -> dict:
     # ANNOVAR's gene-table columns are named after the protocol used —
     # `refGene`, `refGeneWithVer`, `ensGene`, `knownGene`, etc. Pick the first
     # match by scanning the row's keys.
-    func = _first_present(row, "Func.refGene", "Func.refGeneWithVer", "Func.ensGene", "Func.knownGene")
-    exonic_func = _first_present(row, "ExonicFunc.refGene", "ExonicFunc.refGeneWithVer", "ExonicFunc.ensGene", "ExonicFunc.knownGene")
-    aa_change = _first_present(row, "AAChange.refGene", "AAChange.refGeneWithVer", "AAChange.ensGene", "AAChange.knownGene")
-    gene = _first_present(row, "Gene.refGene", "Gene.refGeneWithVer", "Gene.ensGene", "Gene.knownGene")
+    func = _first_present(row, "Func.refGeneWithVer", "Func.refGene", "Func.ensGene", "Func.knownGene")
+    exonic_func = _first_present(row, "ExonicFunc.refGeneWithVer", "ExonicFunc.refGene", "ExonicFunc.ensGene", "ExonicFunc.knownGene")
+    aa_change = _first_present(row, "AAChange.refGeneWithVer", "AAChange.refGene", "AAChange.ensGene", "AAChange.knownGene")
+    gene = _first_present(row, "Gene.refGeneWithVer", "Gene.refGene", "Gene.ensGene", "Gene.knownGene")
     # gnomAD: detect which version's columns are present and pull per-pop AFs.
     # We support v4.1 (`gnomad41_genome_*`), v4.0 (`gnomad40_*`), v2.1 (`gnomad211_*`),
     # and the legacy ALL/AF column from older bundles.
@@ -289,6 +290,8 @@ def _normalize_record(row: dict) -> dict:
         "phastcons100": _f(row, "phastCons100way_vertebrate"),
         "gerp_rs": _f(row, "GERP++_RS", "GERP_pp_RS"),
         "siphy": _f(row, "SiPhy_29way_logOdds"),
+        "dbscsnv_ada": _f(row, "dbscSNV_ADA_SCORE", "dbscsnv_ADA_SCORE"),
+        "dbscsnv_rf": _f(row, "dbscSNV_RF_SCORE", "dbscsnv_RF_SCORE"),
         "_raw": row,
     }
 
@@ -423,6 +426,16 @@ def _persist_record(db, variant_id: int, record: dict, *, source_label: str = SO
             classification=cln_sig,
             review_status=record.get("clinvar_clnrevstat"),
         )
+        wrote_any = True
+
+    # dbscSNV splice-impact scores
+    ada = record.get("dbscsnv_ada")
+    if ada is not None:
+        db.upsert_splice(variant_id, "dbscsnv", score_type="ada", score=ada, source=source_label)
+        wrote_any = True
+    rf = record.get("dbscsnv_rf")
+    if rf is not None:
+        db.upsert_splice(variant_id, "dbscsnv", score_type="rf", score=rf, source=source_label)
         wrote_any = True
 
     # Per-transcript consequence (one row, the refGene-canonical view).

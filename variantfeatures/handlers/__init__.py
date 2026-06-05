@@ -5,7 +5,20 @@ exactly one annotation job. The worker (`variantfeatures.worker`) dispatches
 queue rows to the correct handler by `source` name.
 """
 
-from . import clingen_ar, myvariant, gnomad, alphamissense, annovar, vep  # noqa: F401
+from . import (  # noqa: F401
+    absplice,
+    alphafold,
+    alphamissense,
+    annovar,
+    cadd,
+    clingen_ar,
+    gnomad,
+    myvariant,
+    nmd_external,
+    pext,
+    revel,
+    vep,
+)
 
 # Per-job handlers: one variant per call. Used by the generic worker loop.
 # Each module exposes SOURCE, DEFAULT_RATE_LIMIT_SEC, handle(db, variant_id, payload).
@@ -13,6 +26,7 @@ HANDLERS: dict = {
     clingen_ar.SOURCE: clingen_ar,
     myvariant.SOURCE: myvariant,
     gnomad.SOURCE: gnomad,
+    cadd.SOURCE: cadd,
 }
 
 # Batch handlers: one tool invocation processes many variants. The worker loop
@@ -20,7 +34,10 @@ HANDLERS: dict = {
 # subcommands and skipped by `annotate-pending`. Each module exposes
 # SOURCE and run_batch(db, **kwargs) -> dict.
 BATCH_HANDLERS: dict = {
+    alphafold.SOURCE: alphafold,
     alphamissense.SOURCE: alphamissense,
     annovar.SOURCE: annovar,
+    pext.SOURCE: pext,
+    revel.SOURCE: revel,
     vep.SOURCE: vep,
 }

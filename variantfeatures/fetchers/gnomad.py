@@ -7,8 +7,10 @@ API docs: https://gnomad.broadinstitute.org/api
 """
 
 import time
-from typing import Iterator, Optional, Dict, Any
+from typing import Iterator, Optional, Dict
 import requests
+
+from ..handlers import gnomad as gnomad_handler
 
 # gnomAD GraphQL API endpoint
 GNOMAD_API = "https://gnomad.broadinstitute.org/api"
@@ -133,6 +135,13 @@ def fetch_single_variant(
 ) -> Optional[dict]:
     """
     Fetch gnomAD data for a single variant by coordinates.
+
+    This compatibility wrapper delegates to the normalized gnomAD handler, whose
+    GraphQL query matches the current public schema:
+    `variant(variantId: ..., dataset: ...)`. The single-variant endpoint no
+    longer accepts a `referenceGenome` argument and does not expose `hgvsc` /
+    `hgvsp` directly on `VariantDetails`; transcript consequences live under
+    `transcript_consequences`.
     
     Args:
         chrom: Chromosome (e.g., "7" or "chr7")
@@ -145,53 +154,32 @@ def fetch_single_variant(
     Returns:
         Dict with variant data, or None if not found
     """
-    # Normalize chromosome
-    chrom = chrom.replace("chr", "")
-    
-    variant_id = f"{chrom}-{pos}-{ref}-{alt}"
-    
-    query = f'''
-    {{
-      variant(variantId: "{variant_id}", dataset: {dataset}, referenceGenome: {reference_genome}) {{
-        variant_id
-        hgvsc
-        hgvsp
-        exome {{
-          ac
-          an
-          af
-          homozygote_count
-        }}
-        genome {{
-          ac
-          an
-          af
-          homozygote_count
-        }}
-      }}
-    }}
-    '''
-    
+    if reference_genome.upper() not in {"GRCH38", "GRCH37"}:
+        raise ValueError("reference_genome must be 'GRCh38' or 'GRCh37'")
+
     try:
-        data = _make_graphql_request(query)
+        var = gnomad_handler.fetch_gnomad(chrom, pos, ref, alt, dataset=dataset)
     except Exception as e:
+        variant_id = f"{chrom.replace('chr', '')}-{pos}-{ref}-{alt}"
         print(f"Error fetching {variant_id}: {e}")
         return None
-    
-    var = data.get("data", {}).get("variant")
+
     if not var:
         return None
-    
+
     exome = var.get("exome") or {}
     genome = var.get("genome") or {}
-    
+    exome_af = exome.get("af")
+    genome_af = genome.get("af")
+
     return {
         "variant_id": var.get("variant_id"),
-        "hgvs_p": var.get("hgvsp"),
-        "hgvs_c": var.get("hgvsc"),
-        "gnomad_af": exome.get("af") or genome.get("af"),
+        "rsids": var.get("rsids") or [],
+        "hgvs_p": None,
+        "hgvs_c": None,
+        "gnomad_af": exome_af if exome_af is not None else genome_af,
         "gnomad_homozygotes": (exome.get("homozygote_count") or 0) + (genome.get("homozygote_count") or 0),
-        "gnomad_an": exome.get("an") or genome.get("an"),
+        "gnomad_an": exome.get("an") if exome.get("an") is not None else genome.get("an"),
     }
 
 

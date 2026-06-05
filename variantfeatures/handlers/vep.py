@@ -348,38 +348,12 @@ def _persist_record(db, variant_id: int, record: dict) -> None:
         }.get(am_class, am_class)
         db.upsert_pathogenicity(variant_id, "alphamissense", score=am_score, category=category, source=SOURCE)
 
-    # SpliceAI plugin emits a delta-score block per transcript. Take the first
-    # transcript that has any SpliceAI score and write all 4 directional scores
-    # from that one consequence dict.
-    for csq in transcript_csqs:
-        if not isinstance(csq, dict):
-            continue
-        spliceai_keys = (
-            ("acceptor_gain", "spliceai_pred_ds_ag"),
-            ("acceptor_loss", "spliceai_pred_ds_al"),
-            ("donor_gain", "spliceai_pred_ds_dg"),
-            ("donor_loss", "spliceai_pred_ds_dl"),
-        )
-        if not any(csq.get(k) is not None for _, k in spliceai_keys):
-            continue
-        for score_type, key in spliceai_keys:
-            score = csq.get(key)
-            if score is None:
-                continue
-            try:
-                score_val = float(score)
-            except (TypeError, ValueError):
-                continue
-            distance = csq.get(key.replace("_ds_", "_dp_"))
-            try:
-                distance_val = int(distance) if distance is not None else None
-            except (TypeError, ValueError):
-                distance_val = None
-            db.upsert_splice(
-                variant_id, "spliceai", score_type=score_type,
-                score=score_val, distance=distance_val, source=SOURCE,
-            )
-        break  # one transcript's worth of SpliceAI scores is enough per variant
+    # Splice/splicing-effect plugins. Each plugin writes into annotations_splice
+    # with its own predictor name and score_type.
+    _persist_spliceai(db, variant_id, transcript_csqs)
+    _persist_dbscsnv(db, variant_id, transcript_csqs)
+    _persist_maxentscan(db, variant_id, transcript_csqs)
+    _persist_vep_nmd(db, variant_id, transcript_csqs)
 
     # LOFTEE plugin: pull HC/LC/OS/NA call from transcript consequences. The most
     # confident call wins (HC > LC ≈ OS > NA).
@@ -413,6 +387,157 @@ def _persist_record(db, variant_id: int, record: dict) -> None:
         rsid = ev.get("id")
         if rsid and str(rsid).startswith("rs"):
             db.add_aliases(variant_id, [{"alias_type": "rsid", "alias_value": rsid, "source": SOURCE}])
+
+
+def _persist_spliceai(db, variant_id: int, transcript_csqs: list[dict]) -> None:
+    """Persist SpliceAI split-output or nested-output fields."""
+    for csq in transcript_csqs:
+        if not isinstance(csq, dict):
+            continue
+        spliceai_keys = (
+            ("acceptor_gain", ("spliceai_pred_ds_ag", "SpliceAI_pred_DS_AG", "DS_AG")),
+            ("acceptor_loss", ("spliceai_pred_ds_al", "SpliceAI_pred_DS_AL", "DS_AL")),
+            ("donor_gain", ("spliceai_pred_ds_dg", "SpliceAI_pred_DS_DG", "DS_DG")),
+            ("donor_loss", ("spliceai_pred_ds_dl", "SpliceAI_pred_DS_DL", "DS_DL")),
+        )
+        scores: dict[str, tuple[float, Optional[int]]] = {}
+        for score_type, aliases in spliceai_keys:
+            score_val = _first_numeric(csq, aliases, nested=("spliceai", "SpliceAI"))
+            if score_val is None:
+                continue
+            dp_aliases = tuple(a.replace("_ds_", "_dp_").replace("_DS_", "_DP_").replace("DS_", "DP_") for a in aliases)
+            distance_val = _first_int(csq, dp_aliases, nested=("spliceai", "SpliceAI"))
+            scores[score_type] = (score_val, distance_val)
+        if not scores:
+            continue
+        for score_type, (score_val, distance_val) in scores.items():
+            db.upsert_splice(
+                variant_id, "spliceai", score_type=score_type,
+                score=score_val, distance=distance_val, source=SOURCE,
+            )
+        db.upsert_splice(
+            variant_id,
+            "spliceai",
+            score_type="overall",
+            score=max(score for score, _ in scores.values()),
+            source=SOURCE,
+        )
+        break  # one transcript's worth of SpliceAI scores is enough per variant
+
+
+def _persist_dbscsnv(db, variant_id: int, transcript_csqs: list[dict]) -> None:
+    for csq in transcript_csqs:
+        if not isinstance(csq, dict):
+            continue
+        ada = _first_numeric(csq, ("ada_score", "dbscsnv_ada_score", "dbscSNV_ada_score"))
+        rf = _first_numeric(csq, ("rf_score", "dbscsnv_rf_score", "dbscSNV_rf_score"))
+        if ada is None and rf is None:
+            continue
+        if ada is not None:
+            db.upsert_splice(variant_id, "dbscsnv_ada", score=ada, source=SOURCE)
+        if rf is not None:
+            db.upsert_splice(variant_id, "dbscsnv_rf", score=rf, source=SOURCE)
+        break
+
+
+def _persist_maxentscan(db, variant_id: int, transcript_csqs: list[dict]) -> None:
+    score_fields = {
+        "ref": ("maxentscan_ref", "MaxEntScan_ref"),
+        "alt": ("maxentscan_alt", "MaxEntScan_alt"),
+        "diff": ("maxentscan_diff", "MaxEntScan_diff"),
+        "swa_donor_ref": ("mes-swa_donor_ref", "MES-SWA_donor_ref"),
+        "swa_donor_alt": ("mes-swa_donor_alt", "MES-SWA_donor_alt"),
+        "swa_donor_ref_comp": ("mes-swa_donor_ref_comp", "MES-SWA_donor_ref_comp"),
+        "swa_donor_diff": ("mes-swa_donor_diff", "MES-SWA_donor_diff"),
+        "swa_acceptor_ref": ("mes-swa_acceptor_ref", "MES-SWA_acceptor_ref"),
+        "swa_acceptor_alt": ("mes-swa_acceptor_alt", "MES-SWA_acceptor_alt"),
+        "swa_acceptor_ref_comp": ("mes-swa_acceptor_ref_comp", "MES-SWA_acceptor_ref_comp"),
+        "swa_acceptor_diff": ("mes-swa_acceptor_diff", "MES-SWA_acceptor_diff"),
+        "ncss_upstream_acceptor": ("mes-ncss_upstream_acceptor", "MES-NCSS_upstream_acceptor"),
+        "ncss_upstream_donor": ("mes-ncss_upstream_donor", "MES-NCSS_upstream_donor"),
+        "ncss_downstream_acceptor": ("mes-ncss_downstream_acceptor", "MES-NCSS_downstream_acceptor"),
+        "ncss_downstream_donor": ("mes-ncss_downstream_donor", "MES-NCSS_downstream_donor"),
+    }
+    for csq in transcript_csqs:
+        if not isinstance(csq, dict):
+            continue
+        wrote = False
+        for score_type, aliases in score_fields.items():
+            score = _first_numeric(csq, aliases)
+            if score is None:
+                continue
+            db.upsert_splice(
+                variant_id,
+                "maxentscan",
+                score_type=score_type,
+                score=score,
+                source=SOURCE,
+            )
+            wrote = True
+        if wrote:
+            break
+
+
+def _persist_vep_nmd(db, variant_id: int, transcript_csqs: list[dict]) -> None:
+    for csq in transcript_csqs:
+        if not isinstance(csq, dict):
+            continue
+        nmd = _first_value(csq, ("nmd", "NMD"))
+        if nmd:
+            db.upsert_pathogenicity(
+                variant_id,
+                "nmd_vep",
+                score=0.0,
+                category=str(nmd),
+                source=SOURCE,
+            )
+            break
+
+
+def _first_value(csq: dict, aliases: Iterable[str], *, nested: Iterable[str] = ()) -> Any:
+    """Find a VEP plugin value with case-insensitive fallback and optional nested blocks."""
+    lower_map = {str(k).lower(): v for k, v in csq.items()}
+    for alias in aliases:
+        if alias in csq and csq[alias] not in (None, "", ".", "-"):
+            return csq[alias]
+        value = lower_map.get(str(alias).lower())
+        if value not in (None, "", ".", "-"):
+            return value
+    for nested_key in nested:
+        block = csq.get(nested_key) or lower_map.get(str(nested_key).lower())
+        if not isinstance(block, dict):
+            continue
+        block_lower = {str(k).lower(): v for k, v in block.items()}
+        for alias in aliases:
+            if alias in block and block[alias] not in (None, "", ".", "-"):
+                return block[alias]
+            value = block_lower.get(str(alias).lower())
+            if value not in (None, "", ".", "-"):
+                return value
+    return None
+
+
+def _first_numeric(csq: dict, aliases: Iterable[str], *, nested: Iterable[str] = ()) -> Optional[float]:
+    value = _first_value(csq, aliases, nested=nested)
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _first_int(csq: dict, aliases: Iterable[str], *, nested: Iterable[str] = ()) -> Optional[int]:
+    value = _first_value(csq, aliases, nested=nested)
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return None
 
 
 _VEP_PLUGIN_PATHOGENICITY: list[tuple[str, str]] = [

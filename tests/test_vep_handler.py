@@ -43,6 +43,12 @@ SAMPLE_VEP_RECORD = {
             "spliceai_pred_ds_ag": "0.01",
             "spliceai_pred_ds_dl": 0.99,
             "spliceai_pred_dp_dl": -2,
+            "ada_score": "0.91",
+            "rf_score": 0.82,
+            "MaxEntScan_ref": 8.2,
+            "MaxEntScan_alt": 2.2,
+            "MaxEntScan_diff": 6.0,
+            "NMD": "NMD_escaping_variant",
         },
         {
             "transcript_id": "ENST00000644969",
@@ -125,12 +131,26 @@ def test_persist_record_writes_consequence_pathogenicity_splice_alias(db, vid):
     assert dict(cur.fetchone())["score"] == 0.927  # string form gets coerced
 
     # SpliceAI
-    cur = db.conn.execute("SELECT score_type, score, distance FROM annotations_splice WHERE variant_id = ?", [vid])
+    cur = db.conn.execute("SELECT score_type, score, distance FROM annotations_splice WHERE variant_id = ? AND predictor = 'spliceai'", [vid])
     rows = [dict(r) for r in cur.fetchall()]
     by_type = {r["score_type"]: r for r in rows}
     assert by_type["acceptor_gain"]["score"] == 0.01
     assert by_type["donor_loss"]["score"] == 0.99
     assert by_type["donor_loss"]["distance"] == -2
+    assert by_type["overall"]["score"] == 0.99
+
+    cur = db.conn.execute(
+        "SELECT predictor, score_type, score FROM annotations_splice WHERE variant_id = ? AND predictor IN ('dbscsnv_ada', 'dbscsnv_rf', 'maxentscan')",
+        [vid],
+    )
+    splice_rows = {(r["predictor"], r["score_type"]): r["score"] for r in cur.fetchall()}
+    assert splice_rows[("dbscsnv_ada", "overall")] == 0.91
+    assert splice_rows[("dbscsnv_rf", "overall")] == 0.82
+    assert splice_rows[("maxentscan", "diff")] == 6.0
+
+    cur = db.conn.execute("SELECT score, category FROM annotations_pathogenicity WHERE variant_id = ? AND predictor = 'nmd_vep'", [vid])
+    row = dict(cur.fetchone())
+    assert row == {"score": 0.0, "category": "NMD_escaping_variant"}
 
     # rsID alias from colocated_variants
     aliases = {(a["alias_type"], a["alias_value"]) for a in db.get_aliases(vid)}

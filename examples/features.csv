@@ -1,0 +1,3 @@
+id,gene,uniprot_id,var,var_hgvs_p,resnum,wt_aa,mut_aa,am_pathogenicity,am_class,revel_score,cadd_phred,eve_score,varity_r,pph2_prob,provean_score,clinvar,clinvar_stars,clinvar_review,gnomad_af,gnomad_ac,gnomad_popmax_af
+1,KCNH2,,A123T,p.Ala123Thr,123,A,T,0.1,likely_benign,,,,,,,P,3,reviewed by expert panel,0.001,1,0.002
+2,KCNH2,,W100*,p.Trp100Ter,100,W,*,0.95,likely_pathogenic,,,,,,,LP,1,"criteria provided, single submitter",0.0,0,0.0

@@ -54,6 +54,10 @@ def test_is_installed_returns_false_when_no_env(monkeypatch):
         assert annovar.annovar_home() is None
 
 
+def test_default_protocol_prefers_refgene_with_versions():
+    assert annovar.DEFAULT_PROTOCOLS.split(",", 1)[0] == "refGeneWithVer"
+
+
 # ---------------------------------------------------------------------------
 # parse_multianno
 # ---------------------------------------------------------------------------

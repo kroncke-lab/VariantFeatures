@@ -108,6 +108,47 @@ def test_upsert_conservation(db, vid):
 
 
 # ---------------------------------------------------------------------------
+# structure / expression
+# ---------------------------------------------------------------------------
+
+def test_upsert_structure(db, vid):
+    db.upsert_structure(
+        vid,
+        "alphafold_plddt",
+        feature_version="AFDB_v6",
+        protein_accession="Q12809",
+        residue_number=100,
+        score=92.5,
+        category="very_high_confidence",
+        source="alphafold",
+    )
+    cur = db.conn.execute(
+        "SELECT feature, feature_version, protein_accession, residue_number, score, category FROM annotations_structure WHERE variant_id = ?",
+        [vid],
+    )
+    row = dict(cur.fetchone())
+    assert row == {
+        "feature": "alphafold_plddt",
+        "feature_version": "AFDB_v6",
+        "protein_accession": "Q12809",
+        "residue_number": 100,
+        "score": 92.5,
+        "category": "very_high_confidence",
+    }
+
+
+def test_upsert_expression(db, vid):
+    db.upsert_expression(vid, "pext", dataset="gnomad_pext_v10", tissue="heart", score=0.7, source="pext")
+    db.upsert_expression(vid, "pext", dataset="gnomad_pext_v10", tissue="heart", score=0.8, source="pext")
+    cur = db.conn.execute(
+        "SELECT metric, dataset, tissue, score FROM annotations_expression WHERE variant_id = ?",
+        [vid],
+    )
+    row = dict(cur.fetchone())
+    assert row == {"metric": "pext", "dataset": "gnomad_pext_v10", "tissue": "heart", "score": 0.8}
+
+
+# ---------------------------------------------------------------------------
 # splice
 # ---------------------------------------------------------------------------
 
@@ -135,6 +176,60 @@ def test_annotation_cascade_on_variant_delete(db, vid):
     db.conn.execute("DELETE FROM variants WHERE id = ?", [vid])
     db.conn.commit()
 
-    for table in ("annotations_pathogenicity", "annotations_population", "annotations_clinical", "annotations_conservation", "annotations_splice"):
+    for table in (
+        "annotations_pathogenicity",
+        "annotations_population",
+        "annotations_clinical",
+        "annotations_conservation",
+        "annotations_structure",
+        "annotations_expression",
+        "annotations_splice",
+    ):
         cur = db.conn.execute(f"SELECT COUNT(*) AS n FROM {table} WHERE variant_id = ?", [vid])
         assert cur.fetchone()["n"] == 0, f"{table} did not cascade delete"
+
+
+# ---------------------------------------------------------------------------
+# gene metadata
+# ---------------------------------------------------------------------------
+
+def test_upsert_consequence_seeds_gene_metadata(db, vid):
+    db.upsert_consequence(
+        vid,
+        "ENST00000262186.10",
+        "enumerated",
+        gene_symbol="KCNH2",
+        gene_ensembl="ENSG00000055118",
+        consequence="missense_variant",
+        is_mane_select=1,
+    )
+
+    cur = db.conn.execute("SELECT symbol, ensembl_id, canonical_transcript FROM genes WHERE symbol = 'KCNH2'")
+    assert dict(cur.fetchone()) == {
+        "symbol": "KCNH2",
+        "ensembl_id": "ENSG00000055118",
+        "canonical_transcript": "ENST00000262186.10",
+    }
+
+
+def test_backfill_genes_from_consequences(db, vid):
+    db.upsert_consequence(
+        vid,
+        "ENST00000262186.10",
+        "enumerated",
+        gene_symbol="KCNH2",
+        gene_ensembl="ENSG00000055118",
+        consequence="missense_variant",
+        is_canonical=1,
+    )
+    db.conn.execute("DELETE FROM genes")
+    db.conn.commit()
+
+    count = db.backfill_genes_from_consequences()
+
+    assert count == 1
+    cur = db.conn.execute("SELECT ensembl_id, canonical_transcript FROM genes WHERE symbol = 'KCNH2'")
+    assert dict(cur.fetchone()) == {
+        "ensembl_id": "ENSG00000055118",
+        "canonical_transcript": "ENST00000262186.10",
+    }

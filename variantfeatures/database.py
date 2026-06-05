@@ -308,6 +308,37 @@ CREATE TABLE IF NOT EXISTS annotations_conservation (
     PRIMARY KEY (variant_id, metric)
 );
 
+-- Protein-structure / residue-level features (AlphaFold pLDDT, domains, etc.)
+CREATE TABLE IF NOT EXISTS annotations_structure (
+    variant_id INTEGER NOT NULL REFERENCES variants(id) ON DELETE CASCADE,
+    feature TEXT NOT NULL,                  -- alphafold_plddt, domain, disorder, solvent_accessibility, ...
+    feature_version TEXT NOT NULL DEFAULT '',
+    protein_accession TEXT,                 -- UniProt / Ensembl protein accession when available
+    residue_number INTEGER,                 -- protein-coordinate residue affected by the variant
+    score REAL,
+    category TEXT,                          -- predictor-specific label, e.g. very_high_confidence
+    source TEXT,
+    fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (variant_id, feature, feature_version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_structure_feature ON annotations_structure(feature);
+
+-- Tissue/transcript expression-style annotations (gnomAD pext, AbExp, etc.)
+CREATE TABLE IF NOT EXISTS annotations_expression (
+    variant_id INTEGER NOT NULL REFERENCES variants(id) ON DELETE CASCADE,
+    metric TEXT NOT NULL,                   -- pext, abexp, transcript_tpm, ...
+    dataset TEXT NOT NULL DEFAULT '',       -- gnomad_pext_v10, absplice, ...
+    tissue TEXT NOT NULL DEFAULT '',
+    transcript_id TEXT NOT NULL DEFAULT '',
+    score REAL,
+    source TEXT,
+    fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (variant_id, metric, dataset, tissue, transcript_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_expression_metric ON annotations_expression(metric, dataset, tissue);
+
 -- Gene-level constraint metrics from gnomAD (pLI, LOEUF, mis_z, etc.)
 -- One row per (gene_symbol, dataset) pair.
 CREATE TABLE IF NOT EXISTS gene_constraint (
@@ -359,12 +390,22 @@ CREATE INDEX IF NOT EXISTS idx_penetrance_gene ON penetrance_estimates(gene);
 class VariantDB:
     """SQLite database for variant features."""
     
-    def __init__(self, db_path: Optional[Path] = None):
+    def __init__(
+        self,
+        db_path: Optional[Path] = None,
+        *,
+        initialize: bool = True,
+        read_only: bool = False,
+    ):
         self.db_path = db_path or DEFAULT_DB
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(self.db_path)
+        if read_only:
+            self.conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+        else:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            self.conn = sqlite3.connect(self.db_path)
         self.conn.row_factory = sqlite3.Row
-        self._init_schema()
+        if initialize:
+            self._init_schema()
     
     def _init_schema(self):
         self.conn.executescript(SCHEMA)
@@ -392,17 +433,7 @@ class VariantDB:
     
     def upsert_gene(self, symbol: str, **features):
         """Insert or update gene-level annotations."""
-        columns = ["symbol"] + list(features.keys())
-        placeholders = ", ".join(["?"] * len(columns))
-        updates = ", ".join(f"{k} = excluded.{k}" for k in features.keys())
-        updates += ", updated_at = CURRENT_TIMESTAMP"
-        
-        sql = f"""
-        INSERT INTO genes ({", ".join(columns)})
-        VALUES ({placeholders})
-        ON CONFLICT(symbol) DO UPDATE SET {updates}
-        """
-        self.conn.execute(sql, [symbol] + list(features.values()))
+        self._execute_gene_upsert(symbol, features)
         self.conn.commit()
     
     def _upsert(self, table: str, gene: str, hgvs_p: str, **features):
@@ -593,7 +624,76 @@ class VariantDB:
         ON CONFLICT(variant_id, transcript_id, source) DO UPDATE SET {updates}
         """
         self.conn.execute(sql, list(all_fields.values()))
+        self._upsert_gene_from_consequence(transcript_id, fields)
         self.conn.commit()
+
+    def _upsert_gene_from_consequence(self, transcript_id: str, fields: dict) -> None:
+        symbol = fields.get("gene_symbol")
+        if not symbol:
+            return
+        features = {}
+        if fields.get("gene_ensembl"):
+            features["ensembl_id"] = fields["gene_ensembl"]
+        if fields.get("is_mane_select") or fields.get("is_canonical"):
+            features["canonical_transcript"] = transcript_id
+        self._execute_gene_upsert(str(symbol).upper(), features)
+
+    def _execute_gene_upsert(self, symbol: str, features: dict) -> None:
+        clean_features = {k: v for k, v in features.items() if v is not None}
+        columns = ["symbol"] + list(clean_features.keys())
+        placeholders = ", ".join(["?"] * len(columns))
+        updates = ", ".join(f"{k} = excluded.{k}" for k in clean_features.keys())
+        if updates:
+            updates += ", updated_at = CURRENT_TIMESTAMP"
+        else:
+            updates = "updated_at = CURRENT_TIMESTAMP"
+        sql = f"""
+        INSERT INTO genes ({", ".join(columns)})
+        VALUES ({placeholders})
+        ON CONFLICT(symbol) DO UPDATE SET {updates}
+        """
+        self.conn.execute(sql, [symbol.upper()] + list(clean_features.values()))
+
+    def backfill_genes_from_consequences(self) -> int:
+        """Populate missing `genes` rows from existing variant_consequences data.
+
+        Returns the number of distinct gene symbols observed in consequence rows.
+        """
+        cur = self.conn.execute(
+            """
+            SELECT
+                UPPER(gene_symbol) AS symbol,
+                gene_ensembl,
+                transcript_id,
+                is_mane_select,
+                is_canonical,
+                source
+            FROM variant_consequences
+            WHERE gene_symbol IS NOT NULL AND gene_symbol != ''
+            ORDER BY
+                UPPER(gene_symbol),
+                is_mane_select DESC,
+                is_canonical DESC,
+                CASE source WHEN 'enumerated' THEN 0 ELSE 1 END,
+                transcript_id
+            """
+        )
+        chosen: dict[str, dict] = {}
+        for row in cur.fetchall():
+            symbol = row["symbol"]
+            if symbol in chosen:
+                continue
+            features = {}
+            if row["gene_ensembl"]:
+                features["ensembl_id"] = row["gene_ensembl"]
+            if row["transcript_id"]:
+                features["canonical_transcript"] = row["transcript_id"]
+            chosen[symbol] = features
+
+        for symbol, features in chosen.items():
+            self._execute_gene_upsert(symbol, features)
+        self.conn.commit()
+        return len(chosen)
 
     def get_consequences(self, variant_id: int) -> list[dict]:
         cur = self.conn.execute(
@@ -803,6 +903,61 @@ class VariantDB:
             fetched_at = CURRENT_TIMESTAMP
         """
         self.conn.execute(sql, [variant_id, metric, score, rank_score, source])
+        self.conn.commit()
+
+    def upsert_structure(
+        self,
+        variant_id: int,
+        feature: str,
+        *,
+        feature_version: str = "",
+        protein_accession: Optional[str] = None,
+        residue_number: Optional[int] = None,
+        score: Optional[float] = None,
+        category: Optional[str] = None,
+        source: Optional[str] = None,
+    ) -> None:
+        sql = """
+        INSERT INTO annotations_structure
+            (variant_id, feature, feature_version, protein_accession, residue_number, score, category, source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(variant_id, feature, feature_version) DO UPDATE SET
+            protein_accession = excluded.protein_accession,
+            residue_number = excluded.residue_number,
+            score = excluded.score,
+            category = excluded.category,
+            source = excluded.source,
+            fetched_at = CURRENT_TIMESTAMP
+        """
+        self.conn.execute(sql, [
+            variant_id, feature, feature_version, protein_accession,
+            residue_number, score, category, source,
+        ])
+        self.conn.commit()
+
+    def upsert_expression(
+        self,
+        variant_id: int,
+        metric: str,
+        *,
+        dataset: str = "",
+        tissue: str = "",
+        transcript_id: str = "",
+        score: Optional[float] = None,
+        source: Optional[str] = None,
+    ) -> None:
+        sql = """
+        INSERT INTO annotations_expression
+            (variant_id, metric, dataset, tissue, transcript_id, score, source)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(variant_id, metric, dataset, tissue, transcript_id) DO UPDATE SET
+            score = excluded.score,
+            source = excluded.source,
+            fetched_at = CURRENT_TIMESTAMP
+        """
+        self.conn.execute(sql, [
+            variant_id, metric, dataset or "", tissue or "", transcript_id or "", score, source,
+        ])
         self.conn.commit()
 
     def upsert_gene_constraint(
