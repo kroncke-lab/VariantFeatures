@@ -39,7 +39,7 @@ VariantFeatures/
 │       ├── gnomad.py        # Population frequencies (GraphQL)
 │       └── lof.py           # Loss-of-function annotations
 ├── scripts/
-│   └── load_kcnh2_scores.py # Example: populate KCNH2 scores
+│   └── full_gene_pipeline.sh # End-to-end per-gene annotation pipeline
 ├── data/
 │   ├── variants.db          # Main SQLite database
 │   ├── alphamissense/       # AlphaMissense TSV (~1.1GB)
@@ -72,26 +72,26 @@ variantfeatures build --gene BRCA1
 # → Outputs unified SQLite + CSV
 ```
 
-## Database Schema
+## Database Schema (normalized)
+The old flat `variants_missense` / `variants_lof` tables were removed; data now
+lives in a normalized, identity-centric schema:
 ```sql
-variants_missense:
-  - gene, hgvs_p, hgvs_c
-  - chromosome, position, ref, alt, genome_build
-  - alphamissense_score, alphamissense_class
-  - revel_score
-  - cadd_phred, cadd_raw
-  - clinvar_significance, clinvar_stars
-  - gnomad_af, gnomad_homozygotes
-  - alphafold_plddt, domain
+variants:                 -- canonical identity, one row per GRCh38 SNV
+  - chromosome, position, ref, alt, variant_type, hgvs_g, ca_id, vrs_id
 
-genes:
-  - symbol, ensembl_id, canonical_transcript
-  - pli, loeuf (constraint metrics)
+variant_consequences:     -- one row per transcript per source
+  - variant_id, gene_symbol, gene_ensembl, transcript_id, consequence
+  - hgvs_c, hgvs_p, aa_pos, is_mane_select, is_canonical, source
 
-penetrance_estimates:
-  - variant linkage
-  - penetrance_mean, ci_lower, ci_upper
-  - model_version, n_carriers
+annotations_*:            -- per feature family, keyed by variant_id + version
+  - pathogenicity, population, clinical, conservation, splice, expression, structure
+
+gene_constraint:          -- per-gene gnomAD metrics (pli, oe_lof; LOEUF = oe_lof_upper)
+genes:                    -- gene identity (symbol, ensembl_id, canonical_transcript)
+variant_aliases:          -- rsID / ClinVar / gnomAD / CA-ID / HGVS aliases
+
+penetrance_estimates:     -- downstream BayesianPenetranceEstimator output
+  - variant_id, penetrance_mean, ci_lower, ci_upper, model_version, n_carriers
 ```
 
 ## Related Repos

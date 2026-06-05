@@ -162,9 +162,10 @@ def fetch_cadd_for_gene(
     
     # Get variants with genomic coordinates
     cursor = conn.execute("""
-        SELECT hgvs_p, chromosome, position, ref, alt
-        FROM variants_missense
-        WHERE gene = ? AND chromosome IS NOT NULL AND position IS NOT NULL
+        SELECT DISTINCT c.hgvs_p, v.chromosome, v.position, v.ref, v.alt
+        FROM variants v
+        JOIN variant_consequences c ON c.variant_id = v.id
+        WHERE c.gene_symbol = ? AND v.chromosome IS NOT NULL AND v.position IS NOT NULL
     """, (gene.upper(),))
     
     variants = [dict(row) for row in cursor.fetchall()]

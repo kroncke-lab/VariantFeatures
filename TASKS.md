@@ -55,7 +55,7 @@ ls -lh data/alphamissense/AlphaMissense_aa_substitutions.tsv.gz
 /usr/bin/python3 -c "from variantfeatures.fetchers.alphamissense import fetch_alphamissense; print(list(fetch_alphamissense('KCNH2'))[:3])"
 
 # 3. DB has scores
-sqlite3 data/variants.db "SELECT COUNT(*) FROM variants_missense WHERE gene='KCNH2' AND alphamissense_score IS NOT NULL"
+sqlite3 data/variants.db "SELECT COUNT(DISTINCT p.variant_id) FROM annotations_pathogenicity p JOIN variant_consequences c ON c.variant_id=p.variant_id WHERE c.gene_symbol='KCNH2' AND p.predictor='alphamissense'"
 ```
 
 ---
@@ -83,7 +83,7 @@ sqlite3 data/variants.db "SELECT COUNT(*) FROM variants_missense WHERE gene='KCN
 /usr/bin/python3 -c "from variantfeatures.fetchers.gnomad import fetch_gnomad; import itertools; print(list(itertools.islice(fetch_gnomad('KCNH2'), 5)))"
 
 # 2. DB has AF values
-sqlite3 data/variants.db "SELECT hgvs_p, gnomad_af FROM variants_missense WHERE gene='KCNH2' AND gnomad_af IS NOT NULL LIMIT 5"
+sqlite3 data/variants.db "SELECT c.hgvs_p, pop.af FROM annotations_population pop JOIN variant_consequences c ON c.variant_id=pop.variant_id WHERE c.gene_symbol='KCNH2' AND pop.pop='all' LIMIT 5"
 ```
 
 ---

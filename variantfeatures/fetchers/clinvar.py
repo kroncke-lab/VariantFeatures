@@ -192,54 +192,6 @@ def fetch_clinvar(
             }
 
 
-def load_clinvar_to_db(
-    db,
-    genes: list[str],
-    data_file: Optional[Path] = None,
-    verbose: bool = False,
-) -> dict[str, int]:
-    """
-    Load ClinVar data for multiple genes into the database.
-    
-    Args:
-        db: VariantDB instance
-        genes: List of gene symbols
-        data_file: Path to variant_summary.txt.gz
-        verbose: Print progress
-    
-    Returns:
-        Dict of gene -> count of variants loaded
-    """
-    counts = {}
-    
-    for gene in genes:
-        if verbose:
-            print(f"Loading ClinVar data for {gene}...")
-        
-        count = 0
-        for variant in fetch_clinvar(gene, data_file):
-            db.upsert_missense(
-                gene=gene,
-                hgvs_p=variant["hgvs_p"],
-                hgvs_c=variant["hgvs_c"],
-                clinvar_id=variant["clinvar_id"],
-                clinvar_significance=variant["clinvar_significance"],
-                clinvar_review_status=variant["clinvar_review_status"],
-                clinvar_stars=variant["clinvar_stars"],
-                clinvar_last_evaluated=variant["clinvar_last_evaluated"],
-                chromosome=variant["chromosome"],
-                position=variant["position"],
-                ref=variant["ref"],
-                alt=variant["alt"],
-            )
-            count += 1
-        
-        counts[gene] = count
-        if verbose:
-            print(f"  Loaded {count} variants")
-    
-    return counts
-
 
 if __name__ == "__main__":
     # Quick test

@@ -51,8 +51,6 @@ def main():
     help="Local gnomAD pext bigWig directory for the expression source.",
 )
 @click.option("--pext-dataset", default="ucsc_gnomad_pext_hg38", show_default=True)
-@click.option("--legacy", is_flag=True, help="Use the old variants_missense build path")
-@click.option("--skip-download", is_flag=True, help="Legacy compatibility; normalized build never auto-downloads large files")
 def build(
     gene_opts: tuple,
     genes: str,
@@ -65,17 +63,11 @@ def build(
     strict: bool,
     pext_bigwig_dir: str,
     pext_dataset: str,
-    legacy: bool,
-    skip_download: bool,
 ):
     """Build/update the normalized database for one or more genes."""
     gene_list = _parse_gene_options(gene_opts, genes)
     if not gene_list:
         raise click.UsageError("Pass at least one --gene/-g or --genes value.")
-
-    if legacy:
-        _legacy_build(gene_list, Path(db) if db else None, sources)
-        return
 
     from .build import BuildError, build_gene, parse_sources
     from .transcripts import TranscriptError
@@ -154,87 +146,14 @@ def _open_db(db: str | None, *, read_only: bool = False) -> VariantDB:
     return VariantDB(db_path, initialize=not read_only, read_only=read_only)
 
 
-def _legacy_build(gene_list: list[str], db_path: Path | None, sources: str) -> None:
-    """Old variants_missense loader retained for backwards compatibility."""
-    if sources in ("all", "core"):
-        source_list = ["alphamissense", "gnomad", "clinvar"]
-    else:
-        source_list = [s.strip().lower() for s in sources.split(",") if s.strip()]
-
-    click.echo(f"Building legacy missense database for genes: {', '.join(gene_list)}")
-    click.echo(f"Sources: {', '.join(source_list)}")
-
-    vdb = VariantDB(db_path)
-
-    for gene in gene_list:
-        click.echo(f"\n{'=' * 60}")
-        click.echo(f"Processing {gene}")
-        click.echo(f"{'=' * 60}")
-
-        if "alphamissense" in source_list:
-            click.echo(f"\n[AlphaMissense] Fetching scores for {gene}...")
-            try:
-                from .fetchers.alphamissense import fetch_alphamissense
-
-                count = 0
-                for variant in fetch_alphamissense(gene):
-                    vdb.upsert_missense(
-                        gene=gene,
-                        hgvs_p=variant["hgvs_p"],
-                        alphamissense_score=variant["alphamissense_score"],
-                        alphamissense_class=variant["alphamissense_class"],
-                    )
-                    count += 1
-                click.echo(f"  Loaded {count} AlphaMissense scores")
-            except FileNotFoundError:
-                click.echo("  Skipped: AlphaMissense data not downloaded yet")
-                click.echo("  Run: python -m variantfeatures.fetchers.alphamissense")
-            except ValueError as e:
-                click.echo(f"  Skipped: {e}")
-            except Exception as e:  # noqa: BLE001 - legacy command reports and continues.
-                click.echo(f"  Error: {e}")
-
-        if "gnomad" in source_list:
-            click.echo(f"\n[gnomAD] Fetching frequencies for {gene}...")
-            try:
-                from .fetchers.gnomad import fetch_gnomad
-
-                count = 0
-                for variant in fetch_gnomad(gene):
-                    if variant.get("hgvs_p"):
-                        vdb.upsert_missense(
-                            gene=gene,
-                            hgvs_p=variant["hgvs_p"],
-                            hgvs_c=variant.get("hgvs_c"),
-                            gnomad_af=variant.get("gnomad_af"),
-                            gnomad_homozygotes=variant.get("gnomad_homozygotes"),
-                        )
-                        count += 1
-                click.echo(f"  Loaded {count} gnomAD variants")
-            except Exception as e:  # noqa: BLE001 - legacy command reports and continues.
-                click.echo(f"  Error: {e}")
-
-        if "clinvar" in source_list:
-            click.echo("\n[ClinVar] Note: ClinVar data loaded separately via scripts/load_clinvar.py")
-
-    click.echo(f"\n{'=' * 60}")
-    click.echo("Legacy build complete!")
-    click.echo(f"Database: {vdb.db_path}")
-
 
 @main.command()
 @click.option("--gene", "-g", required=True, help="Gene symbol")
 @click.option("--db", type=click.Path(), default=None, help="Database path")
 @click.option("--format", "fmt", type=click.Choice(["csv", "json", "table"]), default="table")
-@click.option("--include-lof", is_flag=True, help="Legacy query only: include variants_lof rows")
-@click.option("--legacy", is_flag=True, help="Query the old variants_missense/variants_lof tables")
-def query(gene: str, db: str, fmt: str, include_lof: bool, legacy: bool):
+def query(gene: str, db: str, fmt: str):
     """Query variants for a gene."""
     vdb = _open_db(db, read_only=True)
-
-    if legacy:
-        _query_legacy(vdb, gene, fmt, include_lof)
-        return
 
     from .normalized_export import build_wide_rows
 
@@ -253,53 +172,6 @@ def query(gene: str, db: str, fmt: str, include_lof: bool, legacy: bool):
     else:
         _print_normalized_query_table(gene, variants, fieldnames)
 
-
-def _query_legacy(vdb: VariantDB, gene: str, fmt: str, include_lof: bool) -> None:
-    """Query the legacy missense/LOF tables retained for older workflows."""
-    variants = vdb.get_gene_missense(gene.upper())
-
-    if include_lof:
-        lof_variants = vdb.get_gene_lof(gene.upper())
-        for v in variants:
-            v['variant_type'] = 'missense'
-        for v in lof_variants:
-            v['variant_type'] = 'lof'
-        variants.extend(lof_variants)
-    
-    if not variants:
-        click.echo(f"No legacy variants found for {gene}")
-        return
-
-    if fmt == "json":
-        click.echo(json.dumps(variants, indent=2, default=str))
-
-    elif fmt == "csv":
-        if variants:
-            fieldnames = list(variants[0].keys())
-            writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(variants)
-
-    else:
-        click.echo(f"Found {len(variants)} legacy variants for {gene}")
-        click.echo()
-        click.echo(f"{'HGVS':<20} {'ClinVar':<20} {'AM Score':<10} {'gnomAD AF':<12} {'REVEL':<8}")
-        click.echo("-" * 80)
-
-        for v in variants[:50]:  # Limit output
-            hgvs = v.get('hgvs_p', 'N/A')[:19]
-            clinvar = (v.get('clinvar_significance') or 'N/A')[:19]
-            am = v.get('alphamissense_score')
-            am_str = f"{am:.3f}" if am else 'N/A'
-            gnomad = v.get('gnomad_af')
-            gnomad_str = f"{gnomad:.2e}" if gnomad else 'N/A'
-            revel = v.get('revel_score')
-            revel_str = f"{revel:.3f}" if revel else 'N/A'
-
-            click.echo(f"{hgvs:<20} {clinvar:<20} {am_str:<10} {gnomad_str:<12} {revel_str:<8}")
-
-        if len(variants) > 50:
-            click.echo(f"\n... and {len(variants) - 50} more variants (use --format csv for full output)")
 
 
 def _print_normalized_query_table(gene: str, variants: list[dict], fieldnames: list[str]) -> None:
@@ -370,15 +242,11 @@ def _format_af(value) -> str:
 
 @main.command()
 @click.option("--db", type=click.Path(), default=None, help="Database path")
-@click.option("--legacy", is_flag=True, help="Report the old variants_missense/variants_lof tables")
-def stats(db: str, legacy: bool):
+def stats(db: str):
     """Show database statistics."""
     vdb = _open_db(db, read_only=True)
 
-    if legacy:
-        _stats_legacy(vdb)
-    else:
-        _stats_normalized(vdb)
+    _stats_normalized(vdb)
 
     click.echo(f"\nDatabase: {vdb.db_path}")
 
@@ -484,39 +352,6 @@ def _normalized_gene_constraint_counts(vdb: VariantDB) -> list[dict]:
     return [dict(row) for row in vdb.conn.execute(sql)]
 
 
-def _stats_legacy(vdb: VariantDB) -> None:
-    click.echo("VariantFeatures Legacy Database Statistics")
-    click.echo("=" * 60)
-
-    cur = vdb.conn.execute("""
-        SELECT
-            gene,
-            COUNT(*) as total,
-            SUM(CASE WHEN clinvar_id IS NOT NULL THEN 1 ELSE 0 END) as clinvar,
-            SUM(CASE WHEN alphamissense_score IS NOT NULL THEN 1 ELSE 0 END) as alphamissense,
-            SUM(CASE WHEN gnomad_af IS NOT NULL THEN 1 ELSE 0 END) as gnomad,
-            SUM(CASE WHEN revel_score IS NOT NULL THEN 1 ELSE 0 END) as revel
-        FROM variants_missense
-        GROUP BY gene
-        ORDER BY total DESC
-    """)
-
-    click.echo(f"\n{'Gene':<10} {'Total':<8} {'ClinVar':<10} {'AlphaMissense':<15} {'gnomAD':<10} {'REVEL':<10}")
-    click.echo("-" * 70)
-
-    for row in cur:
-        click.echo(f"{row[0]:<10} {row[1]:<8} {row[2]:<10} {row[3]:<15} {row[4]:<10} {row[5]:<10}")
-
-    # LOF stats
-    lof_cur = vdb.conn.execute("SELECT gene, COUNT(*) FROM variants_lof GROUP BY gene ORDER BY gene")
-    lof_data = list(lof_cur)
-
-    if lof_data:
-        click.echo(f"\nLOF Variants:")
-        click.echo("-" * 30)
-        for row in lof_data:
-            click.echo(f"  {row[0]}: {row[1]}")
-
 
 @main.command()
 @click.option("--gene", "-g", required=True, help="Gene symbol")
@@ -526,62 +361,42 @@ def _stats_legacy(vdb: VariantDB) -> None:
 @click.option("--groups", default="all", show_default=True,
               help="Feature groups: all,pathogenicity,population,clinical,splice,expression,structure,conservation,gene_constraint")
 @click.option("--include-provenance", is_flag=True, help="Include source columns in wide export")
-@click.option("--legacy", is_flag=True, help="Export the old variants_missense table instead")
-def export(gene: str, db: str, output: str, layout: str, groups: str, include_provenance: bool, legacy: bool):
+def export(gene: str, db: str, output: str, layout: str, groups: str, include_provenance: bool):
     """Export variants for downstream pipelines."""
     db_path = Path(db) if db else None
     vdb = VariantDB(db_path)
 
-    if not legacy:
-        from .normalized_export import ExportError, export_gene
+    from .normalized_export import ExportError, export_gene
 
-        try:
-            summary = export_gene(
-                vdb,
-                gene.upper(),
-                output,
-                layout=layout,
-                groups=groups,
-                include_provenance=include_provenance,
-            )
-        except ExportError as e:
-            click.echo(f"Error: {e}", err=True)
-            sys.exit(1)
+    try:
+        summary = export_gene(
+            vdb,
+            gene.upper(),
+            output,
+            layout=layout,
+            groups=groups,
+            include_provenance=include_provenance,
+        )
+    except ExportError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
 
-        if layout == "wide":
-            if summary["variants"] == 0:
-                click.echo(f"No normalized variants found for {gene}")
-                return
-            click.echo(
-                f"Exported {summary['variants']} normalized variants "
-                f"({summary['columns']} columns) to {summary['path']}"
-            )
-        else:
-            if summary["rows"] == 0:
-                click.echo(f"No normalized feature rows found for {gene}")
-                return
-            click.echo(
-                f"Exported {summary['rows']} normalized feature rows "
-                f"({summary['columns']} columns) to {summary['path']}"
-            )
-        return
-
-    variants = vdb.get_gene_missense(gene.upper())
-
-    if not variants:
-        click.echo(f"No variants found for {gene}")
-        return
-
-    output_path = Path(output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(output_path, 'w', newline='') as f:
-        fieldnames = list(variants[0].keys())
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(variants)
-
-    click.echo(f"Exported {len(variants)} legacy missense variants to {output_path}")
+    if layout == "wide":
+        if summary["variants"] == 0:
+            click.echo(f"No normalized variants found for {gene}")
+            return
+        click.echo(
+            f"Exported {summary['variants']} normalized variants "
+            f"({summary['columns']} columns) to {summary['path']}"
+        )
+    else:
+        if summary["rows"] == 0:
+            click.echo(f"No normalized feature rows found for {gene}")
+            return
+        click.echo(
+            f"Exported {summary['rows']} normalized feature rows "
+            f"({summary['columns']} columns) to {summary['path']}"
+        )
 
 
 @main.command()

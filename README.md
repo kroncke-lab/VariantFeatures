@@ -87,9 +87,10 @@ The normalized path uses `variants` for canonical GRCh38 alleles,
 | Conservation | `annotations_conservation` | `conservation.<metric>...` |
 | Gene constraint | `gene_constraint` | `gene_constraint.<dataset>...` |
 
-Legacy `variants_missense` and `variants_lof` tables are still present for old
-loaders. Use `variantfeatures query --legacy`, `variantfeatures stats --legacy`,
-or `variantfeatures export --legacy` when that old shape is needed.
+The legacy `variants_missense` / `variants_lof` tables have been removed — all
+data now lives in the normalized `variants` + `variant_consequences` +
+`annotations_*` schema above. There is no longer a `--legacy` mode on `query`,
+`stats`, or `export`.
 
 ## On-Disk Storage
 
@@ -153,7 +154,7 @@ VariantFeatures/
 │       ├── gnomad.py        # GraphQL API
 │       └── lof.py           # LOFTEE annotations
 ├── scripts/
-│   └── load_kcnh2_scores.py # Example loader
+│   └── full_gene_pipeline.sh # End-to-end per-gene annotation pipeline
 ├── data/
 │   ├── variants.db          # Local generated SQLite database, ignored by git
 │   ├── alphamissense/       # Cached TSV
