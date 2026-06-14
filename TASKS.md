@@ -27,6 +27,10 @@ enumerates canonical variants into `variants` + `variant_consequences`, queues
 family-specific normalized annotations, and can run available annotators. `export`
 now defaults to normalized wide/long output with explicit feature-family prefixes.
 
+**Must-have fully populated genes:** APOE, MYBPC3, BRCA1, BRCA2, KCNH2, additive
+to whatever genes are already present in `data/variants.db`. Use canonical
+`MYBPC3` for the cardiomyopathy gene; `MYPBC3` is a typo.
+
 ---
 
 ## ✅ Task 1: AlphaMissense Integration — FETCHER IMPLEMENTED
@@ -144,20 +148,33 @@ RYR2       376      376        0               0          0
 **Status:** Implemented.
 
 - `variantfeatures build --gene KCNH2` is now the normalized canonical build path.
+- `--isoforms canonical|mane|all` controls whether the build enumerates only the
+  default MANE/canonical transcript or multiple coding isoforms.
 - `--sources` accepts source groups such as `core`, `all`, `population`,
-  `splice`, `expression`, `structure`, `pathogenicity`, `pext`, `revel`, and `cadd`.
+  `clinical`, `clinvar`, `splice`, `expression`, `structure`, `pathogenicity`,
+  `pext`, `revel`, and `cadd`.
+- `core` includes ClinVar: the build attempts local ClinVar `variant_summary.txt.gz`
+  import and also keeps MyVariant ClinVar parsing as an online fallback.
 - `--no-run` supports deterministic enumerate/queue-only builds.
 - `variantfeatures export` now defaults to normalized output.
 - `--layout wide` emits one row per variant with namespaced columns.
+- `--layout transcript-wide` emits one row per variant/transcript consequence for
+  isoform-aware prediction models.
 - `--layout long` emits one row per feature field for auditing feature provenance.
 - `variantfeatures feature-schema` documents where pext, splice, population,
   clinical, structure, conservation, pathogenicity, and gene-constraint features live.
+
+Isoform-specific consequence rows should be adjudicated with transcript-scoped
+expression/pext when available. Effects limited to poorly expressed or
+biologically irrelevant isoforms should be kept in the database but down-weighted
+by downstream models rather than collapsed into the canonical row.
 
 ## Deferred Predictor Wiring Added
 
 **Status:** Implemented as first-class handlers/importers where external data remains large or model-specific.
 
 - `alphafold-run`: fetches AlphaFold DB confidence JSON and stores per-variant `alphafold_plddt` in `annotations_structure`.
+- `clinvar-import`: imports local ClinVar `variant_summary.txt.gz` rows into `annotations_clinical`.
 - VEP parser now persists SpliceAI overall/directional scores, dbscSNV ADA/RF, MaxEntScan scores, and VEP NMD plugin output.
 - `pext-import` / `pext-run`: imports local gnomAD pext CSV/TSV exports into `annotations_expression`.
 - `absplice-import`: imports AbSplice_DNA/RNA into `annotations_splice` and AbExp columns into `annotations_expression`.

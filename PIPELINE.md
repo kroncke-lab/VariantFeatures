@@ -31,20 +31,24 @@ Initial focus: Cardiac channelopathies (KCNH2, KCNQ1, SCN5A, RYR2)
 │                      (VariantFeatures)                              │
 ├─────────────────────────────────────────────────────────────────────┤
 │  MISSENSE VARIANTS:                                                 │
+│  • Isoform-specific consequence prediction                          │
 │  • AlphaMissense pathogenicity scores                               │
 │  • REVEL ensemble scores                                            │
 │  • CADD (PHRED + raw)                                               │
 │  • ClinVar classification + review status                           │
 │  • gnomAD allele frequencies                                        │
 │  • Structural features (domain, AlphaFold proximity)                │
+│  • pext / expression for isoform relevance adjudication             │
 │                                                                     │
 │  LOF VARIANTS (nonsense, frameshift, splice):                       │
+│  • Transcript/isoform affected and protein position                 │
 │  • gnomAD pLI / LOEUF scores (gene-level)                           │
 │  • LOFTEE confidence (HC/LC)                                        │
 │  • NMD escape prediction                                            │
 │  • Truncation position (% protein remaining)                        │
 │  • ClinVar classification                                           │
 │  • gnomAD allele frequencies                                        │
+│  • pext / expression for isoform relevance adjudication             │
 │                                                                     │
 │  OUTPUT: variants_missense.tsv                                      │
 │          variants_lof.tsv                                           │
@@ -104,6 +108,39 @@ International collaborations (LQT2, etc.) ────►    Estimator
                                                (Clinical UI)
 ```
 
+## Publishing to Azure
+
+VariantFeatures publishes cloud-ready build artifacts as an explicit opt-in
+step after the local SQLite warehouse has been built. A publish run writes a
+standalone SQLite slice per gene plus a provenance manifest, then uploads those
+artifacts to Azure Blob Storage.
+
+Recommended shared-container layout:
+
+```text
+pipeline/variantfeatures/{YYYYMMDD-HHMM}__{gitsha7}/
+  genes/KCNH2.db
+  genes/KCNQ1.db
+  manifest.json
+
+pipeline/variantfeatures/latest.json
+```
+
+`latest.json` is the atomic import pointer for Variant_Browser. It is a
+per-gene map whose values contain the current slice path, SHA-256, build time,
+and schema version. Publish updates it with an Azure Blob ETag `if-match` write
+after all versioned artifacts are present.
+
+```bash
+cd VariantFeatures
+python -m variantfeatures publish \
+    --gene KCNH2 \
+    --prefix pipeline/variantfeatures
+```
+
+Use `--dry-run` to build `dist/publish/{date__sha}/` locally and print the blob
+paths, hashes, and `latest.json` diff without contacting Azure.
+
 ## Variant Type Handling
 
 ### Missense Variants
@@ -124,6 +161,18 @@ International collaborations (LQT2, etc.) ────►    Estimator
 - Non-coding regulatory
 
 ## Gene Targets
+
+### Must-Have Fully Populated Genes
+These genes must be fully populated in addition to any existing genes already
+present in the VariantFeatures database:
+
+| Gene | Notes |
+|------|-------|
+| APOE | Added grant target |
+| MYBPC3 | Cardiomyopathy; canonical symbol (`MYPBC3` is a typo) |
+| BRCA1 | Cancer susceptibility |
+| BRCA2 | Cancer susceptibility |
+| KCNH2 | Active LQT2 target |
 
 ### Phase 1: Cardiac Channelopathies (4 genes)
 | Gene | Syndrome | Priority |
@@ -153,12 +202,14 @@ python -m gvf run --gene KCNH2 --output data/kcnh2/
 
 # 2. Feature annotation
 cd VariantFeatures
-python -m variantfeatures build --gene KCNH2 --variants data/kcnh2/variants.tsv
+python -m variantfeatures build --gene KCNH2 --isoforms all
+python -m variantfeatures export --gene KCNH2 --layout transcript-wide --output data/kcnh2/features_isoforms.csv
+python -m variantfeatures publish --gene KCNH2 --prefix pipeline/variantfeatures
 
 # 3. Penetrance estimation
 cd BayesianPenetranceEstimator
 python -m bpe estimate \
-    --features data/kcnh2/features_missense.tsv \
+    --features data/kcnh2/features_isoforms.csv \
     --phenotypes data/kcnh2/phenotype_counts.tsv \
     --output results/kcnh2/
 

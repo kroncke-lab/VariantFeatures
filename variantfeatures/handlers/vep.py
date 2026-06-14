@@ -127,6 +127,7 @@ def run_batch(
     db,
     *,
     limit: Optional[int] = None,
+    gene_filter: Optional[str] = None,
     species: Optional[str] = None,
     assembly: Optional[str] = None,
     plugins: Optional[list[str]] = None,
@@ -157,7 +158,11 @@ def run_batch(
     plugins = list(plugins or configured_plugins())
     extra_args = list(extra_args or [])
 
-    jobs = db.claim_pending_jobs(source=SOURCE, limit=limit if limit is not None else 1_000_000)
+    jobs = db.claim_pending_jobs(
+        source=SOURCE,
+        limit=limit if limit is not None else 1_000_000,
+        gene_filter=gene_filter,
+    )
     if not jobs:
         return {"claimed": 0, "annotated": 0, "missing": 0}
 

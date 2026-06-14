@@ -58,16 +58,18 @@ python -m variantfeatures stats
 
 # Export for downstream analysis
 python -m variantfeatures export --gene KCNH2 --output kcnh2_features.csv
+python -m variantfeatures export --gene KCNH2 --layout transcript-wide --output kcnh2_isoforms.csv
 ```
 
 ## Target Architecture (TODO)
 ```bash
 # Future: single command builds everything
 variantfeatures build --gene BRCA1
-# → Looks up transcripts, coords
+# → Looks up selected transcripts/isoforms, coords
 # → Downloads/extracts AlphaMissense, REVEL scores
 # → Fetches CADD scores via API
 # → Fetches gnomAD frequencies
+# → Uses pext/expression as an isoform relevance adjudicator
 # → Downloads AlphaFold structure
 # → Outputs unified SQLite + CSV
 ```
@@ -82,6 +84,10 @@ variants:                 -- canonical identity, one row per GRCh38 SNV
 variant_consequences:     -- one row per transcript per source
   - variant_id, gene_symbol, gene_ensembl, transcript_id, consequence
   - hgvs_c, hgvs_p, aa_pos, is_mane_select, is_canonical, source
+
+transcripts:              -- isoforms selected during build/enumeration
+  - transcript_id, refseq_match, protein_id, biotype, cds_length
+  - is_mane_select, is_mane_plus_clinical, is_canonical, appris
 
 annotations_*:            -- per feature family, keyed by variant_id + version
   - pathogenicity, population, clinical, conservation, splice, expression, structure

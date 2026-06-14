@@ -2,7 +2,7 @@
 
 import sqlite3
 from pathlib import Path
-from typing import Optional, Literal
+from typing import Iterable, Optional, Literal
 
 DEFAULT_DB = Path(__file__).parent.parent / "data" / "variants.db"
 
@@ -92,6 +92,30 @@ CREATE TABLE IF NOT EXISTS variant_aliases (
 
 CREATE INDEX IF NOT EXISTS idx_aliases_lookup ON variant_aliases(alias_type, alias_value);
 
+-- Gene isoforms considered during build/enumeration.
+CREATE TABLE IF NOT EXISTS transcripts (
+    transcript_id TEXT PRIMARY KEY,          -- versioned Ensembl transcript ID used in variant_consequences
+    gene_symbol TEXT NOT NULL,
+    gene_ensembl TEXT,
+    ensembl_transcript_id TEXT,
+    transcript_version TEXT,
+    refseq_match TEXT,
+    protein_id TEXT,
+    biotype TEXT,
+    chromosome TEXT,
+    strand INTEGER,
+    cds_length INTEGER,
+    is_canonical INTEGER DEFAULT 0,
+    is_mane_select INTEGER DEFAULT 0,
+    is_mane_plus_clinical INTEGER DEFAULT 0,
+    transcript_support_level TEXT,
+    appris TEXT,
+    source TEXT,
+    fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_transcripts_gene ON transcripts(gene_symbol);
+
 -- Per-transcript consequence (one variant -> many transcripts)
 -- Source 'enumerated' = predicted by saturation mutagenesis; 'vep'/'annovar'/'clingen_ar' = external annotator.
 CREATE TABLE IF NOT EXISTS variant_consequences (
@@ -118,6 +142,33 @@ CREATE TABLE IF NOT EXISTS variant_consequences (
 
 CREATE INDEX IF NOT EXISTS idx_consequences_gene ON variant_consequences(gene_symbol, consequence);
 CREATE INDEX IF NOT EXISTS idx_consequences_transcript ON variant_consequences(transcript_id);
+
+-- Frameshift-to-nonsense proxy mappings.
+-- Each row says: a frameshift at frameshift_aa_pos can borrow predictor
+-- features from this finite, concrete stop_gained SNV proxy.
+CREATE TABLE IF NOT EXISTS frameshift_nonsense_mappings (
+    id INTEGER PRIMARY KEY,
+    gene_symbol TEXT NOT NULL,
+    transcript_id TEXT NOT NULL,
+    frameshift_aa_pos INTEGER NOT NULL,
+    direction TEXT NOT NULL,                -- self, left, right
+    n_steps_wrt_frameshift INTEGER NOT NULL,
+    max_search_steps INTEGER NOT NULL,
+    proxy_variant_id INTEGER NOT NULL REFERENCES variants(id) ON DELETE CASCADE,
+    proxy_aa_pos INTEGER NOT NULL,
+    proxy_aa_ref TEXT,
+    proxy_codon_ref TEXT,
+    proxy_codon_alt TEXT,
+    proxy_hgvs_p TEXT,
+    source TEXT NOT NULL DEFAULT 'frameshift_nearest_stop_snv',
+    fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(gene_symbol, transcript_id, frameshift_aa_pos, direction, proxy_variant_id, source)
+);
+
+CREATE INDEX IF NOT EXISTS idx_frameshift_map_gene_pos
+    ON frameshift_nonsense_mappings(gene_symbol, frameshift_aa_pos);
+CREATE INDEX IF NOT EXISTS idx_frameshift_map_proxy
+    ON frameshift_nonsense_mappings(proxy_variant_id);
 
 -- Async annotation queue: one row per (variant, source) pair.
 CREATE TABLE IF NOT EXISTS annotation_jobs (
@@ -510,6 +561,76 @@ class VariantDB:
         self.conn.commit()
         return len(chosen)
 
+    def upsert_transcript(self, transcript, *, source: str = "ensembl") -> None:
+        """Insert or update metadata for one transcript/isoform object."""
+        transcript_id = transcript.transcript_id_versioned
+        sql = """
+        INSERT INTO transcripts
+            (transcript_id, gene_symbol, gene_ensembl, ensembl_transcript_id,
+             transcript_version, refseq_match, protein_id, biotype, chromosome,
+             strand, cds_length, is_canonical, is_mane_select,
+             is_mane_plus_clinical, transcript_support_level, appris, source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(transcript_id) DO UPDATE SET
+            gene_symbol = excluded.gene_symbol,
+            gene_ensembl = excluded.gene_ensembl,
+            ensembl_transcript_id = excluded.ensembl_transcript_id,
+            transcript_version = excluded.transcript_version,
+            refseq_match = excluded.refseq_match,
+            protein_id = excluded.protein_id,
+            biotype = excluded.biotype,
+            chromosome = excluded.chromosome,
+            strand = excluded.strand,
+            cds_length = excluded.cds_length,
+            is_canonical = excluded.is_canonical,
+            is_mane_select = excluded.is_mane_select,
+            is_mane_plus_clinical = excluded.is_mane_plus_clinical,
+            transcript_support_level = excluded.transcript_support_level,
+            appris = excluded.appris,
+            source = excluded.source,
+            fetched_at = CURRENT_TIMESTAMP
+        """
+        self.conn.execute(
+            sql,
+            [
+                transcript_id,
+                (transcript.gene_symbol or "").upper(),
+                transcript.gene_ensembl,
+                transcript.transcript_id,
+                transcript.transcript_version,
+                transcript.refseq_match,
+                transcript.protein_id,
+                transcript.biotype,
+                transcript.chromosome,
+                transcript.strand,
+                transcript.cds_length,
+                int(bool(transcript.is_canonical)),
+                int(bool(transcript.is_mane_select)),
+                int(bool(transcript.is_mane_plus_clinical)),
+                transcript.transcript_support_level,
+                transcript.appris,
+                source,
+            ],
+        )
+        self.conn.commit()
+
+    def get_transcripts(self, gene_symbol: str) -> list[dict]:
+        cur = self.conn.execute(
+            """
+            SELECT *
+            FROM transcripts
+            WHERE UPPER(gene_symbol) = ?
+            ORDER BY
+                is_mane_select DESC,
+                is_canonical DESC,
+                is_mane_plus_clinical DESC,
+                cds_length DESC,
+                transcript_id
+            """,
+            [gene_symbol.upper()],
+        )
+        return [dict(row) for row in cur.fetchall()]
+
     def get_consequences(self, variant_id: int) -> list[dict]:
         cur = self.conn.execute(
             "SELECT * FROM variant_consequences WHERE variant_id = ? ORDER BY transcript_id, source",
@@ -518,18 +639,161 @@ class VariantDB:
         return [dict(row) for row in cur.fetchall()]
 
     # ------------------------------------------------------------------
+    # Frameshift -> finite stop-gained SNV proxy mappings
+    # ------------------------------------------------------------------
+
+    def upsert_frameshift_nonsense_mapping(
+        self,
+        *,
+        gene_symbol: str,
+        transcript_id: str,
+        frameshift_aa_pos: int,
+        direction: str,
+        n_steps_wrt_frameshift: int,
+        max_search_steps: int,
+        proxy_variant_id: int,
+        proxy_aa_pos: int,
+        proxy_aa_ref: Optional[str] = None,
+        proxy_codon_ref: Optional[str] = None,
+        proxy_codon_alt: Optional[str] = None,
+        proxy_hgvs_p: Optional[str] = None,
+        source: str = "frameshift_nearest_stop_snv",
+    ) -> None:
+        """Insert or update one frameshift-to-nonsense proxy mapping."""
+        sql = """
+        INSERT INTO frameshift_nonsense_mappings
+            (gene_symbol, transcript_id, frameshift_aa_pos, direction,
+             n_steps_wrt_frameshift, max_search_steps, proxy_variant_id,
+             proxy_aa_pos, proxy_aa_ref, proxy_codon_ref, proxy_codon_alt,
+             proxy_hgvs_p, source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(gene_symbol, transcript_id, frameshift_aa_pos, direction, proxy_variant_id, source)
+        DO UPDATE SET
+            n_steps_wrt_frameshift = excluded.n_steps_wrt_frameshift,
+            max_search_steps = excluded.max_search_steps,
+            proxy_aa_pos = excluded.proxy_aa_pos,
+            proxy_aa_ref = excluded.proxy_aa_ref,
+            proxy_codon_ref = excluded.proxy_codon_ref,
+            proxy_codon_alt = excluded.proxy_codon_alt,
+            proxy_hgvs_p = excluded.proxy_hgvs_p,
+            fetched_at = CURRENT_TIMESTAMP
+        """
+        self.conn.execute(
+            sql,
+            [
+                gene_symbol.upper(),
+                transcript_id,
+                frameshift_aa_pos,
+                direction,
+                n_steps_wrt_frameshift,
+                max_search_steps,
+                proxy_variant_id,
+                proxy_aa_pos,
+                proxy_aa_ref,
+                proxy_codon_ref,
+                proxy_codon_alt,
+                proxy_hgvs_p,
+                source,
+            ],
+        )
+        self.conn.commit()
+
+    def clear_frameshift_nonsense_mappings(
+        self,
+        gene_symbol: str,
+        transcript_id: Optional[str] = None,
+        *,
+        source: Optional[str] = None,
+        frameshift_aa_positions: Optional[Iterable[int]] = None,
+    ) -> int:
+        """Delete generated frameshift proxy mappings for a gene/transcript/source."""
+        clauses = ["UPPER(gene_symbol) = ?"]
+        params: list = [gene_symbol.upper()]
+        if transcript_id is not None:
+            clauses.append("transcript_id = ?")
+            params.append(transcript_id)
+        if source is not None:
+            clauses.append("source = ?")
+            params.append(source)
+        if frameshift_aa_positions is not None:
+            positions = [int(pos) for pos in frameshift_aa_positions]
+            if not positions:
+                return 0
+            placeholders = ", ".join("?" for _ in positions)
+            clauses.append(f"frameshift_aa_pos IN ({placeholders})")
+            params.extend(positions)
+
+        cur = self.conn.execute(
+            f"DELETE FROM frameshift_nonsense_mappings WHERE {' AND '.join(clauses)}",
+            params,
+        )
+        self.conn.commit()
+        return cur.rowcount
+
+    def get_frameshift_nonsense_mappings(
+        self,
+        gene_symbol: str,
+        *,
+        frameshift_aa_pos: Optional[int] = None,
+        transcript_id: Optional[str] = None,
+    ) -> list[dict]:
+        """Return frameshift proxy mappings joined to proxy variant identity."""
+        clauses = ["UPPER(m.gene_symbol) = ?"]
+        params: list = [gene_symbol.upper()]
+        if frameshift_aa_pos is not None:
+            clauses.append("m.frameshift_aa_pos = ?")
+            params.append(frameshift_aa_pos)
+        if transcript_id is not None:
+            clauses.append("m.transcript_id = ?")
+            params.append(transcript_id)
+        sql = f"""
+        SELECT
+            m.*,
+            v.chromosome AS proxy_chromosome,
+            v.position AS proxy_position,
+            v.ref AS proxy_ref,
+            v.alt AS proxy_alt,
+            v.variant_type AS proxy_variant_type,
+            v.hgvs_g AS proxy_hgvs_g,
+            c.hgvs_c AS proxy_hgvs_c,
+            COALESCE(c.hgvs_p, m.proxy_hgvs_p) AS proxy_hgvs_p,
+            c.consequence AS proxy_consequence
+        FROM frameshift_nonsense_mappings m
+        JOIN variants v ON v.id = m.proxy_variant_id
+        LEFT JOIN variant_consequences c
+          ON c.variant_id = m.proxy_variant_id
+         AND c.transcript_id = m.transcript_id
+         AND c.source = 'enumerated'
+        WHERE {' AND '.join(clauses)}
+        ORDER BY
+            m.frameshift_aa_pos,
+            m.n_steps_wrt_frameshift,
+            CASE m.direction WHEN 'self' THEN 0 WHEN 'left' THEN 1 WHEN 'right' THEN 2 ELSE 3 END,
+            m.proxy_aa_pos,
+            v.position,
+            v.alt
+        """
+        cur = self.conn.execute(sql, params)
+        return [dict(row) for row in cur.fetchall()]
+
+    # ------------------------------------------------------------------
     # Annotation job queue
     # ------------------------------------------------------------------
 
-    def enqueue_job(self, variant_id: int, source: str, *, priority: int = 100, payload: Optional[str] = None) -> None:
-        """Add a pending annotation job. Idempotent: if (variant, source) already exists, leave its current status alone."""
+    def enqueue_job(self, variant_id: int, source: str, *, priority: int = 100, payload: Optional[str] = None) -> int:
+        """Add a pending annotation job.
+
+        Idempotent: if (variant, source) already exists, leave its current status
+        alone. Returns 1 when a new row is inserted, 0 when it already existed.
+        """
         sql = """
         INSERT INTO annotation_jobs (variant_id, source, priority, payload)
         VALUES (?, ?, ?, ?)
         ON CONFLICT(variant_id, source) DO NOTHING
         """
-        self.conn.execute(sql, [variant_id, source, priority, payload])
+        cur = self.conn.execute(sql, [variant_id, source, priority, payload])
         self.conn.commit()
+        return cur.rowcount
 
     def enqueue_source_for_all_variants(self, source: str, *, priority: int = 100, gene_filter: Optional[str] = None) -> int:
         """Enqueue a job for every variant in the DB (optionally filtered to one gene).
@@ -554,33 +818,47 @@ class VariantDB:
         self.conn.commit()
         return cur.rowcount
 
-    def claim_pending_jobs(self, source: Optional[str] = None, limit: int = 100) -> list[dict]:
+    def claim_pending_jobs(
+        self,
+        source: Optional[str] = None,
+        limit: int = 100,
+        *,
+        gene_filter: Optional[str] = None,
+    ) -> list[dict]:
         """Mark up to `limit` pending jobs as running and return them.
 
         If `source` is given, only that source's jobs are claimed.
+        If `gene_filter` is given, only jobs linked to enumerated variants for
+        that gene are claimed.
         """
+        params: list = []
+        join = ""
+        where = ["j.status = 'pending'"]
+
+        if gene_filter:
+            join = """
+                JOIN variant_consequences c
+                  ON c.variant_id = j.variant_id
+                 AND c.source = 'enumerated'
+                 AND UPPER(c.gene_symbol) = UPPER(?)
+            """
+            params.append(gene_filter)
         if source is not None:
-            cur = self.conn.execute(
-                """
-                SELECT id, variant_id, source, priority, attempts, payload
-                FROM annotation_jobs
-                WHERE status = 'pending' AND source = ?
-                ORDER BY priority, id
-                LIMIT ?
-                """,
-                [source, limit],
-            )
-        else:
-            cur = self.conn.execute(
-                """
-                SELECT id, variant_id, source, priority, attempts, payload
-                FROM annotation_jobs
-                WHERE status = 'pending'
-                ORDER BY priority, id
-                LIMIT ?
-                """,
-                [limit],
-            )
+            where.append("j.source = ?")
+            params.append(source)
+
+        params.append(limit)
+        cur = self.conn.execute(
+            f"""
+            SELECT DISTINCT j.id, j.variant_id, j.source, j.priority, j.attempts, j.payload
+            FROM annotation_jobs j
+            {join}
+            WHERE {' AND '.join(where)}
+            ORDER BY j.priority, j.id
+            LIMIT ?
+            """,
+            params,
+        )
         rows = [dict(r) for r in cur.fetchall()]
         if rows:
             ids = [r["id"] for r in rows]

@@ -74,6 +74,53 @@ def test_long_export_identifies_storage_group(tmp_path: Path):
     assert ("expression", "pext", "score") in groups
 
 
+def test_transcript_wide_export_keeps_isoform_rows_and_scopes_expression(tmp_path: Path):
+    db = VariantDB(tmp_path / "test.db")
+    vid = db.upsert_variant(chromosome="7", position=150000001, ref="A", alt="G")
+    db.upsert_consequence(
+        vid,
+        "ENST_CANON.1",
+        "enumerated",
+        gene_symbol="KCNH2",
+        consequence="missense_variant",
+        hgvs_p="P_CANON:p.Gly1Arg",
+        is_canonical=1,
+    )
+    db.upsert_consequence(
+        vid,
+        "ENST_ALT.1",
+        "enumerated",
+        gene_symbol="KCNH2",
+        consequence="synonymous_variant",
+        hgvs_p="P_ALT:p.Gly1=",
+    )
+    db.upsert_expression(
+        vid,
+        "pext",
+        dataset="test_pext",
+        tissue="heart",
+        transcript_id="ENST_ALT.1",
+        score=0.03,
+    )
+    db.upsert_expression(
+        vid,
+        "pext",
+        dataset="test_pext",
+        tissue="brain",
+        score=0.50,
+    )
+
+    rows, fieldnames = build_wide_rows(db, "KCNH2", row_grain="transcript")
+
+    assert len(rows) == 2
+    assert "expression.pext.test_pext.heart.ENST_ALT_1.score" in fieldnames
+    assert "expression.pext.test_pext.brain.score" in fieldnames
+    by_transcript = {row["transcript_id"]: row for row in rows}
+    assert by_transcript["ENST_ALT.1"]["expression.pext.test_pext.heart.ENST_ALT_1.score"] == 0.03
+    assert "expression.pext.test_pext.heart.ENST_ALT_1.score" not in by_transcript["ENST_CANON.1"]
+    assert by_transcript["ENST_CANON.1"]["expression.pext.test_pext.brain.score"] == 0.50
+
+
 def test_cli_export_defaults_to_normalized_wide(tmp_path: Path):
     db_path = tmp_path / "test.db"
     db = VariantDB(db_path)

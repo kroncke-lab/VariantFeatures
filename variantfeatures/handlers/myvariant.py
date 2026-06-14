@@ -466,12 +466,17 @@ def run_batch(
     db,
     *,
     limit: Optional[int] = None,
+    gene_filter: Optional[str] = None,
     batch_size: int = 500,
     source_label: Optional[str] = None,
     timeout: int = DEFAULT_TIMEOUT,
 ) -> dict:
     """Drain pending MyVariant jobs through the POST batch endpoint."""
-    jobs = db.claim_pending_jobs(source=SOURCE, limit=limit if limit is not None else 1_000_000)
+    jobs = db.claim_pending_jobs(
+        source=SOURCE,
+        limit=limit if limit is not None else 1_000_000,
+        gene_filter=gene_filter,
+    )
     if not jobs:
         return {"claimed": 0, "done": 0, "failed": 0, "notfound": 0, "batches": 0}
 

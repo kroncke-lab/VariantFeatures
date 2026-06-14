@@ -86,6 +86,7 @@ def run_batch(
     db,
     *,
     limit: Optional[int] = None,
+    gene_filter: Optional[str] = None,
     build: str = DEFAULT_BUILD,
     protocols: str = DEFAULT_PROTOCOLS,
     operations: str = DEFAULT_OPERATIONS,
@@ -109,7 +110,11 @@ def run_batch(
             "$ANNOVAR_HOME/humandb exists."
         )
 
-    jobs = db.claim_pending_jobs(source=SOURCE, limit=limit if limit is not None else 1_000_000)
+    jobs = db.claim_pending_jobs(
+        source=SOURCE,
+        limit=limit if limit is not None else 1_000_000,
+        gene_filter=gene_filter,
+    )
     if not jobs:
         return {"claimed": 0, "matched": 0, "missing": 0, "lines_parsed": 0}
 
@@ -234,6 +239,82 @@ def import_multianno(db, path: str | Path, *, source_label: str = SOURCE) -> dic
         if _persist_record(db, variant_id, record, source_label=source_label):
             counts["annotated"] += 1
     return counts
+
+
+def import_dbscsnv(
+    db,
+    path: str | Path,
+    *,
+    gene_filter: Optional[str] = None,
+    source_label: str = "annovar_hg38_dbscsnv11",
+) -> dict:
+    """Import ANNOVAR humandb dbscSNV scores without running ANNOVAR.
+
+    The dbscSNV humandb file is already variant-level (`#Chr`, `Start`, `Ref`,
+    `Alt`, `dbscSNV_ADA_SCORE`, `dbscSNV_RF_SCORE`). Match rows to variants
+    already present in the normalized DB and write splice annotations only.
+    """
+    index = _variant_key_index(db, gene_filter=gene_filter)
+    counts = {"indexed_variants": len(index), "rows": 0, "matched_rows": 0, "splice": 0}
+    if not index:
+        return counts
+
+    with open(Path(path), "r", newline="") as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        for row in reader:
+            counts["rows"] += 1
+            key = _dbscsnv_key(row)
+            variant_ids = index.get(key)
+            if not variant_ids:
+                continue
+            ada = _f(row, "dbscSNV_ADA_SCORE", "dbscsnv_ADA_SCORE")
+            rf = _f(row, "dbscSNV_RF_SCORE", "dbscsnv_RF_SCORE")
+            if ada is None and rf is None:
+                continue
+            counts["matched_rows"] += 1
+            for variant_id in variant_ids:
+                if ada is not None:
+                    db.upsert_splice(variant_id, "dbscsnv", score_type="ada", score=ada, source=source_label)
+                    counts["splice"] += 1
+                if rf is not None:
+                    db.upsert_splice(variant_id, "dbscsnv", score_type="rf", score=rf, source=source_label)
+                    counts["splice"] += 1
+    return counts
+
+
+def _variant_key_index(db, *, gene_filter: Optional[str] = None) -> dict[tuple, list[int]]:
+    if gene_filter:
+        cur = db.conn.execute(
+            """
+            SELECT DISTINCT v.id, v.chromosome, v.position, v.ref, v.alt
+            FROM variants v
+            JOIN variant_consequences c ON c.variant_id = v.id
+            WHERE c.source = 'enumerated' AND UPPER(c.gene_symbol) = UPPER(?)
+            """,
+            [gene_filter],
+        )
+    else:
+        cur = db.conn.execute("SELECT id, chromosome, position, ref, alt FROM variants")
+
+    index: dict[tuple, list[int]] = {}
+    for row in cur.fetchall():
+        key = (
+            normalize_chromosome(row["chromosome"]),
+            int(row["position"]),
+            row["ref"],
+            row["alt"],
+        )
+        index.setdefault(key, []).append(int(row["id"]))
+    return index
+
+
+def _dbscsnv_key(row: dict) -> tuple:
+    return (
+        normalize_chromosome(row.get("#Chr") or row.get("Chr") or row.get("chrom") or ""),
+        int(row.get("Start") or row.get("Pos") or 0),
+        row.get("Ref"),
+        row.get("Alt"),
+    )
 
 
 def parse_multianno(path: str | Path) -> Iterable[dict]:

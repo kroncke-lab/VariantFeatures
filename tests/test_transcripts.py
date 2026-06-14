@@ -13,6 +13,7 @@ from variantfeatures.transcripts import (
     _build_cds_segments,
     _choose_canonical_transcript,
     fetch_canonical_transcript,
+    fetch_gene_transcripts,
     reverse_complement,
 )
 
@@ -171,6 +172,53 @@ def test_choose_canonical_fallback_to_longest_coding():
         {"id": "T3", "biotype": "lincRNA"},
     ]
     assert _choose_canonical_transcript(transcripts)["id"] == "T2"
+
+
+def test_fetch_gene_transcripts_can_return_all_ranked_isoforms(monkeypatch):
+    payload = {
+        "id": "ENSG_TEST",
+        "Transcript": [
+            {
+                "id": "T_CANON",
+                "version": 1,
+                "biotype": "protein_coding",
+                "is_canonical": True,
+                "Translation": {"start": 100, "end": 111, "id": "P_CANON"},
+                "Exon": [{"start": 100, "end": 111}],
+                "seq_region_name": "1",
+                "strand": 1,
+            },
+            {
+                "id": "T_MANE",
+                "version": 2,
+                "biotype": "protein_coding",
+                "MANE": [{"type": "MANE_Select", "refseq_match": "NM_TEST.1"}],
+                "Translation": {"start": 200, "end": 208, "id": "P_MANE"},
+                "Exon": [{"start": 200, "end": 208}],
+                "seq_region_name": "1",
+                "strand": 1,
+            },
+            {"id": "T_NONCODING", "biotype": "lncRNA"},
+        ],
+    }
+
+    monkeypatch.setattr(
+        "variantfeatures.transcripts._fetch_gene_payload",
+        lambda gene, species, timeout: payload,
+    )
+    monkeypatch.setattr(
+        "variantfeatures.transcripts._fetch_cds_sequence",
+        lambda transcript_id, timeout: {
+            "T_CANON": "ATGGAGTAATAG",
+            "T_MANE": "ATGGAGTAA",
+        }[transcript_id],
+    )
+
+    transcripts = fetch_gene_transcripts("TEST", include="all")
+
+    assert [t.transcript_id_versioned for t in transcripts] == ["T_MANE.2", "T_CANON.1"]
+    assert transcripts[0].refseq_match == "NM_TEST.1"
+    assert transcripts[0].is_mane_select is True
 
 
 # ---------------------------------------------------------------------------

@@ -33,6 +33,7 @@ BUILTIN_GENE_TO_UNIPROT: dict[str, str] = {
     "TTN": "Q8WZ42",
     "LDLR": "P01130",
     "APOB": "P04114",
+    "APOE": "P02649",
     "PCSK9": "Q8NBP7",
     "TTR": "P02766",
     "ALPL": "P05186",

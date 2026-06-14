@@ -267,8 +267,7 @@ def populate_for_transcript(
 
         if enqueue:
             for source in sources_map.get(snv.consequence, ()):  # default to none if unknown
-                db.enqueue_job(variant_id, source=source)
-                n_jobs += 1
+                n_jobs += db.enqueue_job(variant_id, source=source)
 
     return {
         "variants": n_variants,

@@ -51,6 +51,7 @@ def run_batch(
     db,
     *,
     limit: Optional[int] = None,
+    gene_filter: Optional[str] = None,
     timeout: int = DEFAULT_TIMEOUT,
     uniprot_overrides: Optional[dict[str, str]] = None,
 ) -> dict:
@@ -58,7 +59,11 @@ def run_batch(
 
     Returns: {"claimed": int, "annotated": int, "failed": int}
     """
-    jobs = db.claim_pending_jobs(source=SOURCE, limit=limit if limit is not None else 1_000_000)
+    jobs = db.claim_pending_jobs(
+        source=SOURCE,
+        limit=limit if limit is not None else 1_000_000,
+        gene_filter=gene_filter,
+    )
     if not jobs:
         return {"claimed": 0, "annotated": 0, "failed": 0}
 

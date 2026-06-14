@@ -136,6 +136,55 @@ def test_import_multianno_creates_variants_and_annotations(db, multianno_file):
     assert any(r["consequence"] == "missense_variant" and r["hgvs_p"] == "p.P2T" for r in rows)
 
 
+def test_import_dbscsnv_matches_existing_gene_variants(db, tmp_path):
+    vid_kcnh2 = db.upsert_variant(chromosome="7", position=150977910, ref="G", alt="T")
+    db.upsert_consequence(
+        variant_id=vid_kcnh2,
+        gene_symbol="KCNH2",
+        transcript_id="NM_000238.4",
+        consequence="missense_variant",
+        source="enumerated",
+    )
+    vid_other = db.upsert_variant(chromosome="7", position=150977901, ref="T", alt="A")
+    db.upsert_consequence(
+        variant_id=vid_other,
+        gene_symbol="OTHER",
+        transcript_id="NM_000000.0",
+        consequence="missense_variant",
+        source="enumerated",
+    )
+    path = tmp_path / "hg38_dbscsnv11.txt"
+    path.write_text(
+        "#Chr\tStart\tEnd\tRef\tAlt\tdbscSNV_ADA_SCORE\tdbscSNV_RF_SCORE\n"
+        "7\t150977910\t150977910\tG\tT\t0.91\t0.82\n"
+        "7\t150977901\t150977901\tT\tA\t0.11\t0.22\n"
+    )
+
+    counts = annovar.import_dbscsnv(db, path, gene_filter="KCNH2")
+
+    assert counts == {"indexed_variants": 1, "rows": 2, "matched_rows": 1, "splice": 2}
+    cur = db.conn.execute(
+        "SELECT variant_id, predictor, score_type, score, source FROM annotations_splice ORDER BY score_type"
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+    assert rows == [
+        {
+            "variant_id": vid_kcnh2,
+            "predictor": "dbscsnv",
+            "score_type": "ada",
+            "score": 0.91,
+            "source": "annovar_hg38_dbscsnv11",
+        },
+        {
+            "variant_id": vid_kcnh2,
+            "predictor": "dbscsnv",
+            "score_type": "rf",
+            "score": 0.82,
+            "source": "annovar_hg38_dbscsnv11",
+        },
+    ]
+
+
 # ---------------------------------------------------------------------------
 # run_batch (mocked subprocess) — verifies command construction
 # ---------------------------------------------------------------------------

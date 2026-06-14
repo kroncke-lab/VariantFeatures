@@ -180,6 +180,7 @@ def fetch_clinvar(
             yield {
                 "hgvs_p": hgvs_p,
                 "hgvs_c": hgvs_c,
+                "clinvar_allele_id": int(fields[COL_ALLELE_ID]) if fields[COL_ALLELE_ID] else None,
                 "clinvar_id": int(fields[COL_VARIATION_ID]) if fields[COL_VARIATION_ID] else None,
                 "clinvar_significance": fields[COL_CLINICAL_SIG],
                 "clinvar_review_status": review_status,

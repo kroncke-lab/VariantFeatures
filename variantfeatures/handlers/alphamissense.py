@@ -53,6 +53,7 @@ _BUILTIN_GENE_TO_UNIPROT: dict[str, str] = {
     "TTN": "Q8WZ42",
     "LDLR": "P01130",
     "APOB": "P04114",
+    "APOE": "P02649",
     "PCSK9": "Q8NBP7",
     "BRAF": "P15056",  # for the test fixture
     # ACMG SF v3.2 + amyloidosis / metabolic
@@ -124,6 +125,7 @@ def run_batch(
     *,
     file_path: Optional[str] = None,
     limit: Optional[int] = None,
+    gene_filter: Optional[str] = None,
     progress_every: int = 5_000_000,
     progress_callback=None,
     gene_uniprot: Optional[dict[str, str]] = None,
@@ -140,7 +142,12 @@ def run_batch(
             f"https://storage.googleapis.com/dm_alphamissense/AlphaMissense_aa_substitutions.tsv.gz"
         )
 
-    pending = _load_pending_index(db, limit=limit, gene_uniprot=gene_uniprot_map(gene_uniprot))
+    pending = _load_pending_index(
+        db,
+        limit=limit,
+        gene_filter=gene_filter,
+        gene_uniprot=gene_uniprot_map(gene_uniprot),
+    )
     if not pending["by_key"]:
         # Either no pending jobs, or none of them matched a known gene -> mark them failed.
         failed = _mark_unmappable(db, pending["unmappable"])
@@ -219,14 +226,24 @@ def _open_maybe_gzip(path: Path):
     return open(path, "rt")
 
 
-def _load_pending_index(db, *, limit: Optional[int], gene_uniprot: dict[str, str]) -> dict:
+def _load_pending_index(
+    db,
+    *,
+    limit: Optional[int],
+    gene_filter: Optional[str],
+    gene_uniprot: dict[str, str],
+) -> dict:
     """Claim pending alphamissense jobs and index them by (uniprot, AM-style variant).
 
     Jobs whose gene_symbol isn't in the uniprot map are returned in the
     'unmappable' list so the caller can mark them failed without scanning the
     big TSV.
     """
-    jobs = db.claim_pending_jobs(source=SOURCE, limit=limit if limit is not None else 1_000_000)
+    jobs = db.claim_pending_jobs(
+        source=SOURCE,
+        limit=limit if limit is not None else 1_000_000,
+        gene_filter=gene_filter,
+    )
     if not jobs:
         return {"by_key": {}, "unmappable": []}
 

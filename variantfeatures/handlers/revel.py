@@ -50,7 +50,13 @@ def file_present(file_path: Optional[str] = None) -> bool:
     return resolve_file_path(file_path).exists()
 
 
-def run_batch(db, *, file_path: Optional[str] = None, limit: Optional[int] = None) -> dict:
+def run_batch(
+    db,
+    *,
+    file_path: Optional[str] = None,
+    limit: Optional[int] = None,
+    gene_filter: Optional[str] = None,
+) -> dict:
     """Drain pending REVEL jobs by scanning the local REVEL file once."""
     path = resolve_file_path(file_path)
     if not path.exists():
@@ -59,7 +65,7 @@ def run_batch(db, *, file_path: Optional[str] = None, limit: Optional[int] = Non
             "revel_with_transcript_ids file/zip under data/revel/."
         )
 
-    pending = _load_pending_index(db, limit=limit)
+    pending = _load_pending_index(db, limit=limit, gene_filter=gene_filter)
     claimed = len(pending["jobs"])
     if claimed == 0:
         return {"claimed": 0, "matched": 0, "failed": 0, "lines_scanned": 0}
@@ -136,8 +142,12 @@ def _open_revel(path: Path) -> Iterable[TextIO]:
         yield fh
 
 
-def _load_pending_index(db, *, limit: Optional[int]) -> dict:
-    jobs = db.claim_pending_jobs(source=SOURCE, limit=limit if limit is not None else 1_000_000)
+def _load_pending_index(db, *, limit: Optional[int], gene_filter: Optional[str]) -> dict:
+    jobs = db.claim_pending_jobs(
+        source=SOURCE,
+        limit=limit if limit is not None else 1_000_000,
+        gene_filter=gene_filter,
+    )
     if not jobs:
         return {"jobs": [], "by_key": {}}
 

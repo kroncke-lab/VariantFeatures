@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from variantfeatures.database import VariantDB
+from variantfeatures.transcripts import CdsSegment, Transcript
 
 
 @pytest.fixture
@@ -78,6 +79,35 @@ def test_upsert_consequence_distinct_sources(db, variant_id):
     assert {r["source"] for r in rows} == {"enumerated", "vep"}
 
 
+def test_upsert_transcript_persists_isoform_metadata(db):
+    transcript = Transcript(
+        transcript_id="ENST_TEST",
+        transcript_version="2",
+        refseq_match="NM_TEST.1",
+        protein_id="ENSP_TEST",
+        gene_symbol="KCNH2",
+        gene_ensembl="ENSG_TEST",
+        biotype="protein_coding",
+        chromosome="7",
+        strand=-1,
+        cds_length=9,
+        cds_sequence="ATGGAGTAA",
+        cds_segments=[CdsSegment(100, 108, 1, 9)],
+        is_canonical=True,
+        is_mane_select=True,
+        transcript_support_level="1",
+        appris="principal1",
+    )
+
+    db.upsert_transcript(transcript)
+
+    [row] = db.get_transcripts("KCNH2")
+    assert row["transcript_id"] == "ENST_TEST.2"
+    assert row["refseq_match"] == "NM_TEST.1"
+    assert row["is_mane_select"] == 1
+    assert row["cds_length"] == 9
+
+
 # ---------------------------------------------------------------------------
 # annotation_jobs
 # ---------------------------------------------------------------------------
@@ -125,6 +155,39 @@ def test_claim_pending_jobs_filters_by_source(db, variant_id):
     am_jobs = db.claim_pending_jobs(source="alphamissense", limit=10)
     assert len(am_jobs) == 1
     assert am_jobs[0]["source"] == "alphamissense"
+
+
+def test_claim_pending_jobs_filters_by_gene(db):
+    kcnh2_variant = db.upsert_variant(chromosome="7", position=1, ref="A", alt="G")
+    brca1_variant = db.upsert_variant(chromosome="17", position=2, ref="A", alt="G")
+    db.upsert_consequence(
+        kcnh2_variant,
+        "NM_KCNH2.1",
+        "enumerated",
+        gene_symbol="KCNH2",
+        consequence="missense_variant",
+    )
+    db.upsert_consequence(
+        brca1_variant,
+        "NM_BRCA1.1",
+        "enumerated",
+        gene_symbol="BRCA1",
+        consequence="missense_variant",
+    )
+    db.enqueue_job(kcnh2_variant, "gnomad")
+    db.enqueue_job(brca1_variant, "gnomad")
+
+    claimed = db.claim_pending_jobs(source="gnomad", gene_filter="BRCA1", limit=10)
+
+    assert [job["variant_id"] for job in claimed] == [brca1_variant]
+    statuses = {
+        row["variant_id"]: row["status"]
+        for row in db.conn.execute("SELECT variant_id, status FROM annotation_jobs")
+    }
+    assert statuses == {
+        kcnh2_variant: "pending",
+        brca1_variant: "running",
+    }
 
 
 def test_mark_job_done(db, variant_id):

@@ -10,7 +10,7 @@ import requests
 
 from .database import VariantDB
 from .enumerate import populate_for_transcript
-from .transcripts import TranscriptError, fetch_canonical_transcript
+from .transcripts import TranscriptError, fetch_gene_transcripts
 
 
 JOB_SOURCES = {
@@ -26,14 +26,17 @@ JOB_SOURCES = {
 }
 
 DIRECT_SOURCES = {
+    "clinvar",
     "gene_constraint",
     "nmd_rule",
     "pext_bigwig",
+    "frameshift_proxy",
 }
 
 SOURCE_ALIASES = {
     "core": {
         "myvariant",
+        "clinvar",
         "gnomad",
         "alphamissense",
         "revel",
@@ -41,6 +44,7 @@ SOURCE_ALIASES = {
         "gene_constraint",
         "nmd_rule",
         "pext_bigwig",
+        "frameshift_proxy",
     },
     "all": JOB_SOURCES | DIRECT_SOURCES,
     "identity": {"clingen_ar"},
@@ -52,8 +56,8 @@ SOURCE_ALIASES = {
     "cadd": {"cadd"},
     "population": {"gnomad"},
     "gnomad": {"gnomad"},
-    "clinical": {"myvariant"},
-    "clinvar": {"myvariant"},
+    "clinical": {"myvariant", "clinvar"},
+    "clinvar": {"myvariant", "clinvar"},
     "structure": {"alphafold"},
     "alphafold": {"alphafold"},
     "splice": {"vep", "annovar"},
@@ -64,16 +68,19 @@ SOURCE_ALIASES = {
     "gene_constraint": {"gene_constraint"},
     "nmd": {"nmd_rule", "vep"},
     "nmd_rule": {"nmd_rule"},
-    "lof": {"vep", "nmd_rule"},
+    "lof": {"vep", "nmd_rule", "frameshift_proxy"},
     "myvariant": {"myvariant"},
     "clingen_ar": {"clingen_ar"},
     "annovar": {"annovar"},
     "vep": {"vep"},
+    "frameshift": {"frameshift_proxy"},
+    "frameshift_proxy": {"frameshift_proxy"},
 }
 
 MISSENSE_ONLY = {"alphamissense", "revel"}
 PROTEIN_POSITION_SOURCES = {"alphafold"}
 ALL_CODING_SNV_SOURCES = {"clingen_ar", "myvariant", "gnomad", "annovar", "vep", "cadd"}
+NONSENSE_REQUIRED_SOURCES = {"nmd_rule", "frameshift_proxy"}
 
 
 class BuildError(Exception):
@@ -92,6 +99,7 @@ class SourceRun:
 class GeneBuildResult:
     gene: str
     transcript_label: str
+    transcript_labels: list[str]
     db_path: Path
     enumeration: dict
     sources: list[SourceRun] = field(default_factory=list)
@@ -153,38 +161,59 @@ def build_gene(
     strict: bool = False,
     pext_bigwig_dir: str | Path = Path("data") / "pext" / "ucsc_hg38",
     pext_dataset: str = "ucsc_gnomad_pext_hg38",
+    frameshift_max_steps: int = 20,
+    isoforms: str = "canonical",
+    max_isoforms: Optional[int] = None,
 ) -> GeneBuildResult:
     """Build/update a normalized database for one gene."""
     selected = parse_sources(sources)
     symbol = gene.upper()
 
     try:
-        transcript = fetch_canonical_transcript(symbol)
+        transcripts = fetch_gene_transcripts(
+            symbol,
+            include=isoforms,
+            max_transcripts=max_isoforms,
+        )
     except TranscriptError:
         raise
     except requests.RequestException as e:
         raise BuildError(f"Network error talking to Ensembl REST: {e}") from e
 
     db = VariantDB(db_path)
-    transcript_label = transcript.refseq_match or transcript.transcript_id_versioned
+    primary_transcript = transcripts[0]
+    transcript_labels = [
+        transcript.refseq_match or transcript.transcript_id_versioned
+        for transcript in transcripts
+    ]
+    transcript_label = transcript_labels[0]
     db.upsert_gene(
         symbol,
-        ensembl_id=transcript.gene_ensembl,
+        ensembl_id=primary_transcript.gene_ensembl,
         canonical_transcript=transcript_label,
     )
 
-    enumeration = populate_for_transcript(
-        transcript,
-        db,
-        types=types,
-        sources_by_consequence=sources_by_consequence(selected),
-        enqueue=True,
-        limit=enumerate_limit,
-    )
+    enumeration = _empty_enumeration_summary()
+    for transcript in transcripts:
+        db.upsert_transcript(transcript)
+        summary = populate_for_transcript(
+            transcript,
+            db,
+            types=_types_with_required_nonsense(types, selected),
+            sources_by_consequence=sources_by_consequence(selected),
+            enqueue=True,
+            limit=enumerate_limit,
+        )
+        _merge_enumeration_summary(
+            enumeration,
+            summary,
+            transcript_label=transcript.refseq_match or transcript.transcript_id_versioned,
+        )
 
     result = GeneBuildResult(
         gene=symbol,
         transcript_label=transcript_label,
+        transcript_labels=transcript_labels,
         db_path=db.db_path,
         enumeration=enumeration,
     )
@@ -199,6 +228,8 @@ def build_gene(
                 strict=strict,
                 pext_bigwig_dir=pext_bigwig_dir,
                 pext_dataset=pext_dataset,
+                frameshift_max_steps=frameshift_max_steps,
+                transcripts=transcripts,
             )
         )
 
@@ -214,6 +245,8 @@ def run_selected_sources(
     strict: bool,
     pext_bigwig_dir: str | Path,
     pext_dataset: str,
+    frameshift_max_steps: int,
+    transcripts: Optional[list] = None,
 ) -> list[SourceRun]:
     """Drain selected annotation sources in dependency-aware order."""
     runs: list[SourceRun] = []
@@ -236,13 +269,21 @@ def run_selected_sources(
 
         record("gene_constraint", _constraint)
 
+    if "clinvar" in selected:
+        def _clinvar():
+            from .handlers import clinvar
+
+            return clinvar.import_gene(db, gene)
+
+        record("clinvar", _clinvar)
+
     # MyVariant has an efficient batch endpoint and covers CADD/dbNSFP/ClinVar/
     # many population fallbacks; run it before narrower sources.
     if "myvariant" in selected:
         def _myvariant():
             from .handlers import myvariant
 
-            return myvariant.run_batch(db, limit=annotation_limit)
+            return myvariant.run_batch(db, limit=annotation_limit, gene_filter=gene)
 
         record("myvariant", _myvariant)
 
@@ -253,7 +294,7 @@ def run_selected_sources(
         def _worker(src=source):
             from .worker import run_pending
 
-            return run_pending(db, source=src, max_jobs=annotation_limit)
+            return run_pending(db, source=src, max_jobs=annotation_limit, gene_filter=gene)
 
         record(source, _worker)
 
@@ -261,7 +302,7 @@ def run_selected_sources(
         def _alphamissense():
             from .handlers import alphamissense
 
-            return alphamissense.run_batch(db, limit=annotation_limit)
+            return alphamissense.run_batch(db, limit=annotation_limit, gene_filter=gene)
 
         record("alphamissense", _alphamissense)
 
@@ -269,7 +310,7 @@ def run_selected_sources(
         def _revel():
             from .handlers import revel
 
-            return revel.run_batch(db, limit=annotation_limit)
+            return revel.run_batch(db, limit=annotation_limit, gene_filter=gene)
 
         record("revel", _revel)
 
@@ -277,7 +318,7 @@ def run_selected_sources(
         def _alphafold():
             from .handlers import alphafold
 
-            return alphafold.run_batch(db, limit=annotation_limit)
+            return alphafold.run_batch(db, limit=annotation_limit, gene_filter=gene)
 
         record("alphafold", _alphafold)
 
@@ -285,7 +326,7 @@ def run_selected_sources(
         def _annovar():
             from .handlers import annovar
 
-            return annovar.run_batch(db, limit=annotation_limit)
+            return annovar.run_batch(db, limit=annotation_limit, gene_filter=gene)
 
         record("annovar", _annovar)
 
@@ -293,7 +334,7 @@ def run_selected_sources(
         def _vep():
             from .handlers import vep
 
-            return vep.run_batch(db, limit=annotation_limit)
+            return vep.run_batch(db, limit=annotation_limit, gene_filter=gene)
 
         record("vep", _vep)
 
@@ -318,4 +359,70 @@ def run_selected_sources(
 
         record("nmd_rule", _nmd_rule)
 
+    if "frameshift_proxy" in selected:
+        def _frameshift_proxy():
+            from . import frameshift
+
+            selected_transcripts = transcripts or [None]
+            total = {
+                "positions": 0,
+                "mapped_positions": 0,
+                "unmapped_positions": 0,
+                "mappings": 0,
+                "nonsense_variants": 0,
+                "jobs_queued": 0,
+                "transcripts": len(selected_transcripts),
+            }
+            for transcript in selected_transcripts:
+                summary = frameshift.annotate_gene(
+                    db,
+                    gene,
+                    transcript=transcript,
+                    max_steps=frameshift_max_steps,
+                )
+                for key in (
+                    "positions",
+                    "mapped_positions",
+                    "unmapped_positions",
+                    "mappings",
+                    "nonsense_variants",
+                    "jobs_queued",
+                ):
+                    total[key] += summary.get(key, 0)
+            return total
+
+        record("frameshift_proxy", _frameshift_proxy)
+
     return runs
+
+
+def _types_with_required_nonsense(types: str | list[str] | tuple[str, ...], selected: set[str]):
+    if not (selected & NONSENSE_REQUIRED_SOURCES):
+        return types
+    if isinstance(types, str):
+        parsed = [t.strip() for t in types.split(",") if t.strip()]
+    else:
+        parsed = list(types)
+    lowered = {t.strip().lower() for t in parsed}
+    if "nonsense" not in lowered and "stop_gained" not in lowered:
+        parsed.append("nonsense")
+    return parsed
+
+
+def _empty_enumeration_summary() -> dict:
+    return {
+        "variants": 0,
+        "consequences": 0,
+        "jobs_queued": 0,
+        "by_consequence": {},
+        "by_transcript": {},
+    }
+
+
+def _merge_enumeration_summary(total: dict, summary: dict, *, transcript_label: str) -> None:
+    total["variants"] += summary.get("variants", 0)
+    total["consequences"] += summary.get("consequences", 0)
+    total["jobs_queued"] += summary.get("jobs_queued", 0)
+    for consequence, count in summary.get("by_consequence", {}).items():
+        total["by_consequence"][consequence] = total["by_consequence"].get(consequence, 0) + count
+    total["by_transcript"][transcript_label] = summary

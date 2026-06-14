@@ -20,6 +20,15 @@ The goal: give it a gene name, get a complete annotation database ready for down
 # Export normalized feature matrix for downstream analysis
 .venv/bin/python -m variantfeatures export --gene KCNH2 --output kcnh2_features.csv
 
+# Export one row per variant/transcript consequence for isoform-aware models
+.venv/bin/python -m variantfeatures export --gene KCNH2 --layout transcript-wide --output kcnh2_isoforms.csv
+
+# Publish a gene-scoped SQLite slice and manifest for Variant_Browser import
+.venv/bin/python -m variantfeatures publish --gene KCNH2 --dry-run
+
+# Map an observed frameshift to finite stop-gained SNV proxies
+.venv/bin/python -m variantfeatures frameshift-map --gene KCNH2 --aa-position 1155 --queue-source cadd
+
 # Show where normalized feature families live
 .venv/bin/python -m variantfeatures feature-schema
 ```
@@ -36,13 +45,14 @@ The goal: give it a gene name, get a complete annotation database ready for down
 ### Clinical Annotations
 | Source | Description |
 |--------|-------------|
-| **ClinVar** | Clinical classifications + review status |
+| **ClinVar** | Clinical classifications + review status from local ClinVar summary and MyVariant fallback |
 | **gnomAD** | Population allele frequencies |
 
 ### LoF / Splice / Structure
 | Source | Description |
 |--------|-------------|
 | **AlphaFold DB** | Per-residue pLDDT at missense or truncation position |
+| **Frameshift proxy map** | Maps frameshift amino-acid positions to nearby stop-gained SNV proxies |
 | **SpliceAI** | Parsed from VEP plugin output (DS/DP + overall max) |
 | **dbscSNV / MaxEntScan** | Parsed from VEP plugin output |
 | **LOFTEE / VEP NMD / nmd-rule** | LoF confidence and NMD escape/trigger annotations |
@@ -57,19 +67,47 @@ The goal: give it a gene name, get a complete annotation database ready for down
 | CADD | On-demand API |
 | ClinVar | 699 |
 
+## Required Fully Populated Genes
+
+The current must-have target set is:
+
+```text
+APOE, MYBPC3, BRCA1, BRCA2, KCNH2
+```
+
+`MYBPC3` is the canonical HGNC symbol for the cardiomyopathy gene sometimes
+mistyped as `MYPBC3`. These targets are additive: keep the existing populated
+genes in `data/variants.db` and fill any missing coverage for this set.
+
+```bash
+.venv/bin/python -m variantfeatures build \
+  --genes APOE,MYBPC3,BRCA1,BRCA2,KCNH2 \
+  --db data/variants.db
+```
+
 ## Target Architecture
 
 ```bash
 # Normalized canonical build for any gene
 variantfeatures build --gene BRCA1
 
+# Include alternate coding isoforms when isoform-specific effects matter
+variantfeatures build --gene BRCA1 --isoforms all
+
 # This:
-# 1. Looks up the canonical/MANE transcript and enumerates coding SNVs
+# 1. Looks up the selected transcript set (canonical by default; MANE/all optional)
+#    and enumerates coding SNVs per isoform
 # 2. Queues/runs normalized sources such as MyVariant/dbNSFP, gnomAD,
 #    AlphaMissense, REVEL, AlphaFold, pext, and NMD rules
 # 3. Stores features in family-specific normalized tables
-# 4. Exports one-row-per-variant wide CSVs or long audit tables
+# 4. Exports one-row-per-variant, one-row-per-transcript, or long audit CSVs
 ```
+
+Isoform-aware builds use one canonical GRCh38 allele row in `variants` and one
+row per affected transcript in `variant_consequences`. Transcript metadata is
+stored in `transcripts`. Transcript-scoped pext/expression rows stay keyed by
+`transcript_id`, which lets downstream models prefer biologically relevant
+isoforms and down-weight effects seen only in weakly expressed isoforms.
 
 ## Database Schema
 
@@ -82,7 +120,7 @@ The normalized path uses `variants` for canonical GRCh38 alleles,
 | Population frequencies | `annotations_population` | `population.<dataset>.<pop>...` |
 | Clinical assertions | `annotations_clinical` | `clinical.<source>...` |
 | Splice predictors | `annotations_splice` | `splice.<predictor>...` |
-| pext / expression features | `annotations_expression` | `expression.<metric>.<dataset>.<tissue>...` |
+| pext / expression features | `annotations_expression` | `expression.<metric>.<dataset>.<tissue>[.<transcript>]...` |
 | Structure / domains | `annotations_structure` | `structure.<feature>...` |
 | Conservation | `annotations_conservation` | `conservation.<metric>...` |
 | Gene constraint | `gene_constraint` | `gene_constraint.<dataset>...` |
@@ -111,7 +149,9 @@ and annotation features:
 |---|---|---|
 | `variants` | One canonical row per allele, using GRCh38 normalized VCF-style coordinates | `id`, `chromosome`, `position`, `ref`, `alt`, `variant_type`, `hgvs_g`, `ca_id`, `vrs_id` |
 | `variant_aliases` | All alternate names that resolve to the same allele | `variant_id`, `alias_type`, `alias_value`, `source`, `fetched_at` |
+| `transcripts` | Gene isoforms selected during build/enumeration | `transcript_id`, `gene_symbol`, `refseq_match`, `protein_id`, `biotype`, `cds_length`, `is_canonical`, `is_mane_select`, `is_mane_plus_clinical`, `transcript_support_level`, `appris` |
 | `variant_consequences` | Per-transcript gene/cDNA/protein effects | `variant_id`, `transcript_id`, `gene_symbol`, `gene_ensembl`, `consequence`, `hgvs_c`, `hgvs_p`, `aa_pos`, `aa_ref`, `aa_alt`, `is_canonical`, `is_mane_select`, `source` |
+| `frameshift_nonsense_mappings` | Frameshift amino-acid positions mapped to finite stop-gained SNV proxy variants | `gene_symbol`, `transcript_id`, `frameshift_aa_pos`, `direction`, `n_steps_wrt_frameshift`, `proxy_variant_id` |
 | `genes` | Gene-level metadata used by builds and exports | `symbol`, `ensembl_id`, `ncbi_id`, `canonical_transcript`, `pli`, `loeuf` |
 | `annotation_jobs` | Work queue for deferred annotation handlers | `variant_id`, `source`, `status`, `attempts`, `last_error` |
 
@@ -139,6 +179,41 @@ when needed, for example `data/alphamissense/` and `data/revel/`. The CLI reads
 from those raw files or APIs, then persists queryable results into the SQLite
 tables above.
 
+## Publishing to Azure Blob
+
+Publishing is separate from `build` and is always opt-in. It creates per-gene
+SQLite slices under `dist/publish/`, writes a provenance manifest, and then
+uploads to Azure Blob when configured:
+
+```bash
+.venv/bin/python -m pip install -e '.[azure]'
+
+export VF_BLOB_ACCOUNT_URL="https://<account>.blob.core.windows.net"
+export VF_BLOB_CONTAINER="variantfeatures"
+
+.venv/bin/python -m variantfeatures publish \
+  --gene KCNH2 \
+  --prefix pipeline/variantfeatures
+```
+
+Blob layout:
+
+```text
+pipeline/variantfeatures/{YYYYMMDD-HHMM}__{gitsha7}/genes/KCNH2.db
+pipeline/variantfeatures/{YYYYMMDD-HHMM}__{gitsha7}/manifest.json
+pipeline/variantfeatures/latest.json
+```
+
+`latest.json` is a per-gene pointer used by Variant_Browser. Each entry includes
+the current slice path, SHA-256, build timestamp, and schema version. The pointer
+is updated with an Azure Blob ETag write after versioned artifacts upload.
+
+Authentication uses `DefaultAzureCredential`; no account keys or secrets are
+stored in this repo. Run `az login` for local publishing, or use managed
+identity/workload identity in cloud jobs. If `VF_BLOB_ACCOUNT_URL` or
+`VF_BLOB_CONTAINER` is unset, `publish` automatically behaves like a dry run and
+prints the blob paths, hashes, and `latest.json` diff without contacting Azure.
+
 ## Project Structure
 
 ```
@@ -146,6 +221,7 @@ VariantFeatures/
 ├── variantfeatures/
 │   ├── cli.py              # Command-line interface
 │   ├── database.py         # SQLite operations
+│   ├── frameshift.py       # Frameshift-to-nonsense proxy mapping
 │   └── fetchers/
 │       ├── alphamissense.py # ~1.1GB TSV
 │       ├── revel.py         # ~6.1GB TSV
@@ -175,6 +251,15 @@ VariantFeatures/
 ## Deferred Predictor Commands
 
 ```bash
+# Frameshift-to-nonsense proxy mapping. Proxy variants are ordinary stop_gained
+# SNVs, so queued sources such as CADD attach through annotations_pathogenicity.
+.venv/bin/python -m variantfeatures frameshift-map \
+  --gene KCNH2 \
+  --aa-position 1155 \
+  --n-steps 20 \
+  --queue-source cadd \
+  --db data/variants.db
+
 # AlphaFold pLDDT for queued variants
 .venv/bin/python -m variantfeatures queue --source alphafold --gene KCNH2 --db data/variants.db
 .venv/bin/python -m variantfeatures alphafold-run --db data/variants.db
@@ -190,8 +275,10 @@ VariantFeatures/
   --include-nmd
 
 # Large/external predictors exported to CSV/TSV
+.venv/bin/python -m variantfeatures clinvar-import variant_summary.txt.gz --gene KCNH2 --db data/variants.db
 .venv/bin/python -m variantfeatures pext-import pext_region.tsv --gene KCNH2 --db data/variants.db
 .venv/bin/python -m variantfeatures absplice-import absplice.tsv --gene KCNH2 --db data/variants.db
+.venv/bin/python -m variantfeatures dbscsnv-import hg38_dbscsnv11.txt --gene KCNH2 --db data/variants.db
 .venv/bin/python -m variantfeatures nmd-import nmdep.tsv --predictor nmdep --gene KCNH2 --db data/variants.db
 ```
 

@@ -164,6 +164,40 @@ def test_run_pending_respects_max_jobs(db):
     assert counts.get("done", 0) == 2
 
 
+def test_run_pending_filters_by_gene(db):
+    kcnh2_variant = db.upsert_variant(chromosome="7", position=1, ref="A", alt="G")
+    brca1_variant = db.upsert_variant(chromosome="17", position=2, ref="C", alt="T")
+    db.upsert_consequence(
+        kcnh2_variant,
+        "NM_KCNH2.1",
+        "enumerated",
+        gene_symbol="KCNH2",
+        consequence="missense_variant",
+    )
+    db.upsert_consequence(
+        brca1_variant,
+        "NM_BRCA1.1",
+        "enumerated",
+        gene_symbol="BRCA1",
+        consequence="missense_variant",
+    )
+    db.enqueue_job(kcnh2_variant, "clingen_ar")
+    db.enqueue_job(brca1_variant, "clingen_ar")
+
+    with patch("variantfeatures.identity.requests.get", return_value=_FakeResp(200, SAMPLE_PAYLOAD)):
+        summary = run_pending(db, source="clingen_ar", gene_filter="BRCA1", rate_limit_sec=0)
+
+    assert summary["claimed"] == 1
+    rows = {
+        row["variant_id"]: row["status"]
+        for row in db.conn.execute("SELECT variant_id, status FROM annotation_jobs")
+    }
+    assert rows == {
+        kcnh2_variant: "pending",
+        brca1_variant: "done",
+    }
+
+
 def test_run_pending_skips_unknown_source(db):
     v1 = db.upsert_variant(chromosome="7", position=1, ref="A", alt="G")
     db.enqueue_job(v1, "imaginary_source")

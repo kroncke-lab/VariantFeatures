@@ -23,6 +23,7 @@ def run_pending(
     db,
     source: Optional[str] = None,
     *,
+    gene_filter: Optional[str] = None,
     batch_size: int = 100,
     max_jobs: Optional[int] = None,
     rate_limit_sec: Optional[float] = None,
@@ -31,7 +32,8 @@ def run_pending(
     """Drain pending jobs.
 
     `source` filters to one source (e.g. 'clingen_ar'). If None, runs every source
-    that has a registered handler.
+    that has a registered handler. `gene_filter` restricts the drain to pending
+    jobs linked to enumerated variants for one gene.
 
     `max_jobs` caps total processed jobs in this run (None = unbounded).
     `rate_limit_sec` overrides the handler's default delay between calls.
@@ -45,7 +47,7 @@ def run_pending(
 
         remaining = (max_jobs - summary["claimed"]) if max_jobs is not None else batch_size
         limit = min(batch_size, remaining)
-        jobs = db.claim_pending_jobs(source=source, limit=limit)
+        jobs = db.claim_pending_jobs(source=source, limit=limit, gene_filter=gene_filter)
         if not jobs:
             break
 

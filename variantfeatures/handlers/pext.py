@@ -90,7 +90,11 @@ def run_batch(
     dataset: str = DEFAULT_DATASET,
 ) -> dict:
     """Drain queued pext jobs using a local pext TSV/CSV."""
-    jobs = db.claim_pending_jobs(source=SOURCE, limit=limit if limit is not None else 1_000_000)
+    jobs = db.claim_pending_jobs(
+        source=SOURCE,
+        limit=limit if limit is not None else 1_000_000,
+        gene_filter=gene_filter,
+    )
     if not jobs:
         return {"claimed": 0, "annotated": 0, "failed": 0, "rows": 0}
     job_ids_by_variant = {j["variant_id"]: j["id"] for j in jobs}

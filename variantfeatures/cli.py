@@ -5,12 +5,15 @@ from __future__ import annotations
 import click
 import csv
 import json
+import os
+import shutil
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
 
-from .database import VariantDB
+from .database import DEFAULT_DB, VariantDB
 
 
 @click.group()
@@ -39,7 +42,7 @@ def main():
     show_default=True,
     help="Variant types to enumerate before annotation.",
 )
-@click.option("--limit", type=int, default=None, help="Stop after N enumerated variants per gene")
+@click.option("--limit", type=int, default=None, help="Stop after N enumerated variants per transcript")
 @click.option("--annotation-limit", type=int, default=None, help="Max jobs per runnable source")
 @click.option("--no-run", is_flag=True, help="Only enumerate and queue jobs; do not run annotators")
 @click.option("--strict", is_flag=True, help="Fail instead of skipping unavailable annotators")
@@ -51,6 +54,26 @@ def main():
     help="Local gnomAD pext bigWig directory for the expression source.",
 )
 @click.option("--pext-dataset", default="ucsc_gnomad_pext_hg38", show_default=True)
+@click.option(
+    "--frameshift-max-steps",
+    type=int,
+    default=20,
+    show_default=True,
+    help="Amino-acid search radius for frameshift_proxy mappings.",
+)
+@click.option(
+    "--isoforms",
+    type=click.Choice(["canonical", "mane", "all"]),
+    default="canonical",
+    show_default=True,
+    help="Transcripts to enumerate before annotation.",
+)
+@click.option(
+    "--max-isoforms",
+    type=int,
+    default=None,
+    help="Cap selected isoforms after MANE/canonical/APPRIS ranking.",
+)
 def build(
     gene_opts: tuple,
     genes: str,
@@ -63,6 +86,9 @@ def build(
     strict: bool,
     pext_bigwig_dir: str,
     pext_dataset: str,
+    frameshift_max_steps: int,
+    isoforms: str,
+    max_isoforms: int,
 ):
     """Build/update the normalized database for one or more genes."""
     gene_list = _parse_gene_options(gene_opts, genes)
@@ -76,6 +102,7 @@ def build(
     selected_sources = parse_sources(sources)
     click.echo(f"Building normalized database for genes: {', '.join(gene_list)}")
     click.echo(f"Sources: {', '.join(sorted(selected_sources))}")
+    click.echo(f"Isoforms: {isoforms}" + (f" (max {max_isoforms})" if max_isoforms else ""))
     if no_run:
         click.echo("Mode: enumerate + queue only")
 
@@ -96,6 +123,9 @@ def build(
                 strict=strict,
                 pext_bigwig_dir=pext_bigwig_dir,
                 pext_dataset=pext_dataset,
+                frameshift_max_steps=frameshift_max_steps,
+                isoforms=isoforms,
+                max_isoforms=max_isoforms,
             )
         except (BuildError, TranscriptError, ValueError) as e:
             click.echo(f"Error: {e}", err=True)
@@ -103,7 +133,16 @@ def build(
 
         final_db_path = result.db_path
         enum = result.enumeration
-        click.echo(f"Transcript: {result.transcript_label}")
+        if len(result.transcript_labels) == 1:
+            click.echo(f"Transcript: {result.transcript_label}")
+        else:
+            click.echo(f"Transcripts: {len(result.transcript_labels)}")
+            for label in result.transcript_labels:
+                tx_summary = enum.get("by_transcript", {}).get(label, {})
+                click.echo(
+                    f"  {label:<24} variants={tx_summary.get('variants', 0)} "
+                    f"consequences={tx_summary.get('consequences', 0)}"
+                )
         click.echo(f"Variants inserted/updated: {enum['variants']}")
         click.echo(f"Consequences written:      {enum['consequences']}")
         click.echo(f"Annotation jobs queued:    {enum['jobs_queued']}")
@@ -357,7 +396,12 @@ def _normalized_gene_constraint_counts(vdb: VariantDB) -> list[dict]:
 @click.option("--gene", "-g", required=True, help="Gene symbol")
 @click.option("--db", type=click.Path(), default=None, help="Database path")
 @click.option("--output", "-o", type=click.Path(), required=True, help="Output CSV file")
-@click.option("--layout", type=click.Choice(["wide", "long"]), default="wide", show_default=True)
+@click.option(
+    "--layout",
+    type=click.Choice(["wide", "transcript-wide", "long"]),
+    default="wide",
+    show_default=True,
+)
 @click.option("--groups", default="all", show_default=True,
               help="Feature groups: all,pathogenicity,population,clinical,splice,expression,structure,conservation,gene_constraint")
 @click.option("--include-provenance", is_flag=True, help="Include source columns in wide export")
@@ -381,12 +425,13 @@ def export(gene: str, db: str, output: str, layout: str, groups: str, include_pr
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
 
-    if layout == "wide":
+    if layout in {"wide", "transcript-wide"}:
         if summary["variants"] == 0:
             click.echo(f"No normalized variants found for {gene}")
             return
+        row_label = "variant/transcript rows" if layout == "transcript-wide" else "variants"
         click.echo(
-            f"Exported {summary['variants']} normalized variants "
+            f"Exported {summary['variants']} normalized {row_label} "
             f"({summary['columns']} columns) to {summary['path']}"
         )
     else:
@@ -397,6 +442,147 @@ def export(gene: str, db: str, output: str, layout: str, groups: str, include_pr
             f"Exported {summary['rows']} normalized feature rows "
             f"({summary['columns']} columns) to {summary['path']}"
         )
+
+
+@main.command()
+@click.option("--gene", "-g", "gene_opts", multiple=True, help="Gene symbol to publish. Repeatable.")
+@click.option(
+    "--all-built",
+    is_flag=True,
+    help="Publish every gene listed in the database's genes table.",
+)
+@click.option(
+    "--db",
+    type=click.Path(),
+    default=str(DEFAULT_DB),
+    show_default=True,
+    help="Database path",
+)
+@click.option("--built-at", default=None, help="ISO-8601 UTC build timestamp")
+@click.option("--prefix", default="variantfeatures", show_default=True, help="Azure blob prefix")
+@click.option(
+    "--include-full-db/--no-full-db",
+    default=False,
+    show_default=True,
+    help="Include the complete SQLite database as an additional artifact.",
+)
+@click.option("--dry-run", is_flag=True, help="Write local artifacts and print the upload plan.")
+def publish(
+    gene_opts: tuple[str, ...],
+    all_built: bool,
+    db: str,
+    built_at: str | None,
+    prefix: str,
+    include_full_db: bool,
+    dry_run: bool,
+):
+    """Publish per-gene SQLite slices and provenance to Azure Blob Storage."""
+    from .publish import (
+        PublishError,
+        build_manifest,
+        export_gene_slice,
+        format_built_at,
+        get_git_sha,
+        parse_built_at,
+        release_name,
+        upload,
+    )
+
+    db_path = Path(db)
+    if all_built:
+        genes = _built_gene_symbols(db_path)
+    else:
+        genes = _parse_gene_options(gene_opts, None)
+        if not genes:
+            raise click.UsageError("Pass at least one --gene/-g or use --all-built.")
+
+    built_at_value = (
+        format_built_at(parse_built_at(built_at))
+        if built_at
+        else format_built_at(datetime.now(timezone.utc))
+    )
+    git_sha = get_git_sha()
+    release = release_name(built_at_value, git_sha)
+    release_dir = Path("dist") / "publish" / release
+    gene_dir = release_dir / "genes"
+    gene_dir.mkdir(parents=True, exist_ok=True)
+
+    slices: dict[str, Path] = {}
+    for gene in genes:
+        out_path = gene_dir / f"{gene}.db"
+        summary = export_gene_slice(db_path, gene, out_path)
+        slices[gene] = out_path
+        click.echo(
+            f"Wrote {gene} slice: {out_path} "
+            f"({summary['row_counts'].get('variants', 0)} variants)"
+        )
+
+    artifacts: dict[str, Path] = dict(slices)
+    if include_full_db:
+        full_db_path = release_dir / "variants.db"
+        shutil.copy2(db_path, full_db_path)
+        artifacts["__full_db__"] = full_db_path
+
+    manifest = build_manifest(db_path, genes, built_at_value, artifacts)
+    manifest_path = release_dir / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    click.echo(f"Wrote manifest: {manifest_path}")
+
+    account_url = os.environ.get("VF_BLOB_ACCOUNT_URL")
+    container = os.environ.get("VF_BLOB_CONTAINER")
+    effective_dry_run = dry_run or not account_url or not container
+    if effective_dry_run and not dry_run:
+        click.echo("Azure is not configured; running as a local dry run.")
+
+    try:
+        result = upload(
+            account_url,
+            container,
+            prefix,
+            built_at_value,
+            git_sha,
+            artifacts,
+            manifest,
+            dry_run=effective_dry_run,
+        )
+    except PublishError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    action = "WOULD upload" if result["dry_run"] else "Uploaded"
+    click.echo()
+    for artifact in result["artifacts"]:
+        status = artifact.get("status")
+        suffix = f" [{status}]" if status else ""
+        click.echo(
+            f"{action}: {artifact['blob_path']} "
+            f"sha256={artifact['sha256']} bytes={artifact['bytes']}{suffix}"
+        )
+    manifest_status = result["manifest"].get("status")
+    manifest_suffix = f" [{manifest_status}]" if manifest_status else ""
+    click.echo(
+        f"{action}: {result['manifest']['blob_path']} "
+        f"sha256={result['manifest']['sha256']} "
+        f"bytes={result['manifest']['bytes']}{manifest_suffix}"
+    )
+    click.echo(f"latest.json: {result['latest_blob_path']}")
+    click.echo("latest.json diff:")
+    click.echo(json.dumps(result["latest_diff"], indent=2, sort_keys=True))
+    click.echo(f"Local artifacts: {release_dir}")
+
+
+def _built_gene_symbols(db_path: Path) -> list[str]:
+    vdb = VariantDB(db_path, initialize=False, read_only=True)
+    try:
+        rows = vdb.conn.execute(
+            "SELECT UPPER(symbol) AS symbol FROM genes ORDER BY UPPER(symbol)"
+        ).fetchall()
+    finally:
+        vdb.close()
+    genes = [row["symbol"] for row in rows if row["symbol"]]
+    if not genes:
+        raise click.UsageError("No genes found in the database's genes table.")
+    return genes
 
 
 @main.command()
@@ -506,16 +692,248 @@ def enumerate_cmd(gene: str, types: str, db: str, no_jobs: bool, limit: int):
     click.echo(f"Database: {vdb.db_path}")
 
 
+@main.command(name="frameshift-map")
+@click.option("--gene", "-g", required=True, help="Gene symbol")
+@click.option(
+    "--aa-position",
+    "aa_positions",
+    type=int,
+    multiple=True,
+    help="Observed frameshift amino-acid position. Repeatable. Omit to map all positions.",
+)
+@click.option(
+    "--n-steps",
+    type=int,
+    default=20,
+    show_default=True,
+    help="Maximum amino-acid distance to search left/right for a stop-gained SNV proxy.",
+)
+@click.option("--db", type=click.Path(), default=None, help="Database path")
+@click.option(
+    "--queue-source",
+    "queue_sources",
+    multiple=True,
+    help="Annotation source to queue for proxy stop-gained variants, e.g. cadd. Repeatable.",
+)
+@click.option(
+    "--no-persist",
+    is_flag=True,
+    help="Compute mappings without writing proxy variants or mapping rows to SQLite.",
+)
+@click.option("--format", "fmt", type=click.Choice(["table", "csv", "json"]), default="table")
+def frameshift_map(
+    gene: str,
+    aa_positions: tuple[int, ...],
+    n_steps: int,
+    db: str,
+    queue_sources: tuple[str, ...],
+    no_persist: bool,
+    fmt: str,
+):
+    """Map frameshift positions to concrete stop-gained SNV proxy variants.
+
+    The proxy variants are normal `variants` rows, so CADD/MyVariant/gnomAD and
+    other predictor annotations stay queryable through the existing schema.
+    """
+    from . import frameshift
+    from .transcripts import TranscriptError
+
+    gene = gene.upper()
+    try:
+        transcript = frameshift.fetch_canonical_transcript(gene)
+    except TranscriptError as e:
+        click.echo(f"Transcript lookup failed: {e}", err=True)
+        sys.exit(1)
+    except requests.RequestException as e:
+        click.echo(f"Network error talking to Ensembl REST: {e}", err=True)
+        sys.exit(2)
+
+    try:
+        if no_persist:
+            rows = _frameshift_preview_rows(transcript, aa_positions, n_steps)
+        else:
+            vdb = VariantDB(Path(db) if db else None)
+            if aa_positions:
+                frameshift.annotate_positions(
+                    vdb,
+                    transcript,
+                    aa_positions,
+                    max_steps=n_steps,
+                    enqueue_sources=queue_sources,
+                    gene_symbol=gene,
+                )
+                rows = []
+                for aa_pos in aa_positions:
+                    rows.extend(
+                        vdb.get_frameshift_nonsense_mappings(
+                            gene,
+                            frameshift_aa_pos=aa_pos,
+                            transcript_id=transcript.transcript_id_versioned,
+                        )
+                    )
+            else:
+                frameshift.annotate_gene(
+                    vdb,
+                    gene,
+                    transcript=transcript,
+                    max_steps=n_steps,
+                    enqueue_sources=queue_sources,
+                )
+                rows = vdb.get_frameshift_nonsense_mappings(
+                    gene,
+                    transcript_id=transcript.transcript_id_versioned,
+                )
+            _attach_proxy_pathogenicity(vdb, rows)
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    output_rows = [_frameshift_output_row(row, gene, transcript.transcript_id_versioned) for row in rows]
+    _print_frameshift_rows(output_rows, fmt)
+
+
+def _frameshift_preview_rows(transcript, aa_positions: tuple[int, ...], n_steps: int) -> list[dict]:
+    from . import frameshift
+
+    positions = aa_positions or tuple(range(1, frameshift.protein_codon_count(transcript) + 1))
+    rows = []
+    for aa_pos in positions:
+        for proxy in frameshift.map_frameshift_position(transcript, aa_pos, max_steps=n_steps):
+            rows.append(proxy.to_record())
+    return rows
+
+
+def _attach_proxy_pathogenicity(vdb: VariantDB, rows: list[dict]) -> None:
+    if not rows:
+        return
+    ids = sorted({row.get("proxy_variant_id") for row in rows if row.get("proxy_variant_id")})
+    if not ids:
+        return
+    placeholders = ", ".join("?" for _ in ids)
+    cur = vdb.conn.execute(
+        f"""
+        SELECT variant_id, predictor, predictor_version, score, category
+        FROM annotations_pathogenicity
+        WHERE variant_id IN ({placeholders})
+        ORDER BY predictor, predictor_version
+        """,
+        ids,
+    )
+    by_variant: dict[int, list[dict]] = {}
+    for row in cur.fetchall():
+        by_variant.setdefault(row["variant_id"], []).append(dict(row))
+
+    for row in rows:
+        annotations = by_variant.get(row.get("proxy_variant_id"), [])
+        row["cadd_phred"] = _first_predictor_score(annotations, "cadd_phred")
+        row["cadd_raw"] = _first_predictor_score(annotations, "cadd_raw")
+        row["pathogenicity"] = "|".join(_format_pathogenicity_annotation(a) for a in annotations)
+
+
+def _first_predictor_score(annotations: list[dict], predictor: str):
+    for annotation in annotations:
+        if annotation.get("predictor") == predictor:
+            return annotation.get("score")
+    return None
+
+
+def _format_pathogenicity_annotation(annotation: dict) -> str:
+    name = annotation.get("predictor") or ""
+    version = annotation.get("predictor_version") or ""
+    if version:
+        name = f"{name}@{version}"
+    value = annotation.get("score")
+    if annotation.get("category"):
+        return f"{name}={value}({annotation['category']})"
+    return f"{name}={value}"
+
+
+def _frameshift_output_row(row: dict, gene: str, transcript_id: str) -> dict:
+    proxy_variant = ""
+    if row.get("proxy_chromosome") and row.get("proxy_position"):
+        proxy_variant = (
+            f"chr{row['proxy_chromosome']}:{row['proxy_position']}:"
+            f"{row.get('proxy_ref')}>{row.get('proxy_alt')}"
+        )
+    return {
+        "gene": row.get("gene_symbol") or gene,
+        "transcript_id": row.get("transcript_id") or transcript_id,
+        "frameshift_aa_pos": row.get("frameshift_aa_pos"),
+        "direction": row.get("direction"),
+        "n_steps_wrt_frameshift": row.get("n_steps_wrt_frameshift"),
+        "proxy_variant_id": row.get("proxy_variant_id"),
+        "proxy_variant": proxy_variant,
+        "proxy_hgvs_c": row.get("proxy_hgvs_c"),
+        "proxy_hgvs_p": row.get("proxy_hgvs_p"),
+        "proxy_aa_pos": row.get("proxy_aa_pos"),
+        "proxy_aa_ref": row.get("proxy_aa_ref"),
+        "proxy_codon_ref": row.get("proxy_codon_ref"),
+        "proxy_codon_alt": row.get("proxy_codon_alt"),
+        "cadd_phred": row.get("cadd_phred"),
+        "cadd_raw": row.get("cadd_raw"),
+        "pathogenicity": row.get("pathogenicity"),
+    }
+
+
+def _print_frameshift_rows(rows: list[dict], fmt: str) -> None:
+    fieldnames = [
+        "gene",
+        "transcript_id",
+        "frameshift_aa_pos",
+        "direction",
+        "n_steps_wrt_frameshift",
+        "proxy_variant_id",
+        "proxy_variant",
+        "proxy_hgvs_c",
+        "proxy_hgvs_p",
+        "proxy_aa_pos",
+        "proxy_aa_ref",
+        "proxy_codon_ref",
+        "proxy_codon_alt",
+        "cadd_phred",
+        "cadd_raw",
+        "pathogenicity",
+    ]
+    if fmt == "json":
+        click.echo(json.dumps(rows, indent=2, default=str))
+        return
+    if fmt == "csv":
+        writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+        return
+    if not rows:
+        click.echo("No frameshift proxy mappings found.")
+        return
+    click.echo(
+        f"{'FS AA':>6} {'DIR':<5} {'D':>3} {'PROXY':<24} "
+        f"{'HGVS.p':<28} {'CADD':>7}"
+    )
+    click.echo("-" * 82)
+    for row in rows[:80]:
+        click.echo(
+            f"{str(row.get('frameshift_aa_pos')):>6} "
+            f"{str(row.get('direction'))[:5]:<5} "
+            f"{str(row.get('n_steps_wrt_frameshift')):>3} "
+            f"{str(row.get('proxy_variant'))[:23]:<24} "
+            f"{str(row.get('proxy_hgvs_p') or '')[:27]:<28} "
+            f"{_format_score(row.get('cadd_phred')):>7}"
+        )
+    if len(rows) > 80:
+        click.echo(f"... and {len(rows) - 80} more (use --format csv/json for full output)")
+
+
 @main.command(name="annotate-pending")
 @click.option("--source", default=None,
               help="Restrict to one source (e.g. clingen_ar). Default: all registered sources.")
+@click.option("--gene", "-g", default=None, help="Restrict to pending jobs for one enumerated gene")
 @click.option("--db", type=click.Path(), default=None, help="Database path")
 @click.option("--limit", type=int, default=None,
               help="Max jobs to process this run (default: drain everything pending)")
 @click.option("--batch-size", type=int, default=100, help="Jobs claimed per round trip")
 @click.option("--rate-limit", type=float, default=None,
               help="Seconds to sleep between handler calls. Overrides handler default.")
-def annotate_pending(source: str, db: str, limit: int, batch_size: int, rate_limit: float):
+def annotate_pending(source: str, gene: str, db: str, limit: int, batch_size: int, rate_limit: float):
     """Process pending annotation jobs from the queue.
 
     Each job calls the handler registered for its source, marks the job done on
@@ -531,17 +949,26 @@ def annotate_pending(source: str, db: str, limit: int, batch_size: int, rate_lim
         sys.exit(1)
 
     vdb = VariantDB(Path(db) if db else None)
+    gene_filter = gene.upper() if gene else None
 
     # Show what we're about to do
-    pending_rows = [r for r in vdb.job_status_counts() if r["status"] == "pending"]
-    if source:
-        pending_rows = [r for r in pending_rows if r["source"] == source]
-    total_pending = sum(r["n"] for r in pending_rows)
+    total_pending = _pending_job_count(vdb, source=source, gene_filter=gene_filter)
     if total_pending == 0:
-        click.echo(f"No pending jobs{f' for source {source!r}' if source else ''}.")
+        where = []
+        if source:
+            where.append(f"source {source!r}")
+        if gene_filter:
+            where.append(f"gene {gene_filter}")
+        suffix = f" for {' and '.join(where)}" if where else ""
+        click.echo(f"No pending jobs{suffix}.")
         return
 
-    click.echo(f"{total_pending} pending job(s)" + (f" for {source}" if source else "") + ".")
+    where = []
+    if source:
+        where.append(source)
+    if gene_filter:
+        where.append(gene_filter)
+    click.echo(f"{total_pending} pending job(s)" + (f" for {', '.join(where)}" if where else "") + ".")
     if limit is not None:
         click.echo(f"Processing up to {limit} this run.")
 
@@ -555,6 +982,7 @@ def annotate_pending(source: str, db: str, limit: int, batch_size: int, rate_lim
     summary = run_pending(
         vdb,
         source=source,
+        gene_filter=gene_filter,
         batch_size=batch_size,
         max_jobs=limit,
         rate_limit_sec=rate_limit,
@@ -568,13 +996,41 @@ def annotate_pending(source: str, db: str, limit: int, batch_size: int, rate_lim
             click.echo(f"  {src:<20} done={counts['done']:<6} failed={counts['failed']:<6} skipped={counts['skipped']}")
 
 
+def _pending_job_count(vdb: VariantDB, *, source: str | None, gene_filter: str | None) -> int:
+    params: list = []
+    join = ""
+    where = ["j.status = 'pending'"]
+    if gene_filter:
+        join = """
+            JOIN variant_consequences c
+              ON c.variant_id = j.variant_id
+             AND c.source = 'enumerated'
+             AND UPPER(c.gene_symbol) = UPPER(?)
+        """
+        params.append(gene_filter)
+    if source:
+        where.append("j.source = ?")
+        params.append(source)
+    row = vdb.conn.execute(
+        f"""
+        SELECT COUNT(DISTINCT j.id)
+        FROM annotation_jobs j
+        {join}
+        WHERE {' AND '.join(where)}
+        """,
+        params,
+    ).fetchone()
+    return int(row[0] or 0)
+
+
 @main.command(name="myvariant-batch-run")
 @click.option("--db", type=click.Path(), default=None, help="Database path")
+@click.option("--gene", "-g", default=None, help="Restrict to pending jobs for one enumerated gene")
 @click.option("--limit", type=int, default=None, help="Max pending jobs to claim this run")
 @click.option("--batch-size", type=int, default=500, show_default=True)
 @click.option("--source-label", default=None,
               help="Stored annotation source label. Default: myvariant_batch_hg38_<today>")
-def myvariant_batch_run(db: str, limit: int, batch_size: int, source_label: str):
+def myvariant_batch_run(db: str, gene: str, limit: int, batch_size: int, source_label: str):
     """Drain pending MyVariant jobs using MyVariant.info's batch endpoint."""
     from .handlers import myvariant
 
@@ -583,6 +1039,7 @@ def myvariant_batch_run(db: str, limit: int, batch_size: int, source_label: str)
         result = myvariant.run_batch(
             vdb,
             limit=limit,
+            gene_filter=gene,
             batch_size=batch_size,
             source_label=source_label,
         )
@@ -624,14 +1081,15 @@ def queue(source: str, gene: str, db: str):
 @click.option("--db", type=click.Path(), default=None, help="Database path")
 @click.option("--file", "file_path", type=click.Path(), default=None,
               help="AlphaMissense TSV(.gz) path (env: ALPHAMISSENSE_FILE)")
+@click.option("--gene", "-g", default=None, help="Restrict to pending jobs for one enumerated gene")
 @click.option("--limit", type=int, default=None, help="Max pending jobs to claim this run")
-def alphamissense_run(db: str, file_path: str, limit: int):
+def alphamissense_run(db: str, file_path: str, gene: str, limit: int):
     """Drain pending alphamissense jobs by single-pass over the AlphaMissense TSV."""
     from .handlers import alphamissense as am
 
     vdb = VariantDB(Path(db) if db else None)
     try:
-        result = am.run_batch(vdb, file_path=file_path, limit=limit)
+        result = am.run_batch(vdb, file_path=file_path, limit=limit, gene_filter=gene)
     except am.HandlerError as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
@@ -643,14 +1101,15 @@ def alphamissense_run(db: str, file_path: str, limit: int):
 @click.option("--db", type=click.Path(), default=None, help="Database path")
 @click.option("--file", "file_path", type=click.Path(), default=None,
               help="REVEL revel_with_transcript_ids file or zip path (env: REVEL_FILE)")
+@click.option("--gene", "-g", default=None, help="Restrict to pending jobs for one enumerated gene")
 @click.option("--limit", type=int, default=None, help="Max pending jobs to claim this run")
-def revel_run(db: str, file_path: str, limit: int):
+def revel_run(db: str, file_path: str, gene: str, limit: int):
     """Drain pending REVEL jobs by single-pass over the local REVEL file."""
     from .handlers import revel
 
     vdb = VariantDB(Path(db) if db else None)
     try:
-        result = revel.run_batch(vdb, file_path=file_path, limit=limit)
+        result = revel.run_batch(vdb, file_path=file_path, limit=limit, gene_filter=gene)
     except revel.HandlerError as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
@@ -662,6 +1121,7 @@ def revel_run(db: str, file_path: str, limit: int):
 
 @main.command(name="annovar-run")
 @click.option("--db", type=click.Path(), default=None, help="Database path")
+@click.option("--gene", "-g", default=None, help="Restrict to pending jobs for one enumerated gene")
 @click.option("--limit", type=int, default=None, help="Max pending jobs to claim this run")
 @click.option("--build", default="hg38", show_default=True)
 @click.option("--protocols", default=None,
@@ -669,7 +1129,7 @@ def revel_run(db: str, file_path: str, limit: int):
 @click.option("--operations", default=None,
               help="ANNOVAR -operation value matching --protocols.")
 @click.option("--keep-outputs", is_flag=True, help="Don't delete the temp work directory.")
-def annovar_run(db: str, limit: int, build: str, protocols: str, operations: str, keep_outputs: bool):
+def annovar_run(db: str, gene: str, limit: int, build: str, protocols: str, operations: str, keep_outputs: bool):
     """Drain pending annovar jobs by invoking ANNOVAR's table_annovar.pl once.
 
     Requires ANNOVAR installed. Set ANNOVAR_HOME (and ANNOVAR_DB if humandb is elsewhere).
@@ -677,7 +1137,7 @@ def annovar_run(db: str, limit: int, build: str, protocols: str, operations: str
     from .handlers import annovar
 
     vdb = VariantDB(Path(db) if db else None)
-    kwargs = {"limit": limit, "build": build, "keep_outputs": keep_outputs}
+    kwargs = {"limit": limit, "gene_filter": gene, "build": build, "keep_outputs": keep_outputs}
     if protocols:
         kwargs["protocols"] = protocols
     if operations:
@@ -703,13 +1163,70 @@ def annovar_import(multianno_path: str, db: str):
     click.echo(f"Imported {counts['variants']} variants ({counts['annotated']} with annotation rows).")
 
 
+@main.command(name="dbscsnv-import")
+@click.argument("dbscsnv_path", type=click.Path(exists=True, dir_okay=False))
+@click.option("--db", type=click.Path(), default=None, help="Database path")
+@click.option("--gene", "-g", default=None, help="Restrict matching to one enumerated gene")
+@click.option("--source-label", default="annovar_hg38_dbscsnv11", show_default=True)
+def dbscsnv_import(dbscsnv_path: str, db: str, gene: str, source_label: str):
+    """Import dbscSNV scores directly from an ANNOVAR humandb text file."""
+    from .handlers import annovar
+
+    vdb = VariantDB(Path(db) if db else None)
+    counts = annovar.import_dbscsnv(
+        vdb,
+        dbscsnv_path,
+        gene_filter=gene,
+        source_label=source_label,
+    )
+    click.echo(
+        f"Indexed {counts['indexed_variants']} variants   scanned rows: {counts['rows']}   "
+        f"matched rows: {counts['matched_rows']}   splice annotations: {counts['splice']}"
+    )
+
+
+@main.command(name="clinvar-import")
+@click.argument("variant_summary_path", required=False, type=click.Path(dir_okay=False))
+@click.option("--db", type=click.Path(), default=None, help="Database path")
+@click.option("--gene", "-g", required=True, help="Restrict matching to one enumerated gene")
+@click.option("--assembly", default="GRCh38", show_default=True)
+@click.option("--include-all-types", is_flag=True, help="Import non-SNV ClinVar rows too")
+def clinvar_import(
+    variant_summary_path: str,
+    db: str,
+    gene: str,
+    assembly: str,
+    include_all_types: bool,
+):
+    """Import ClinVar variant_summary rows into normalized clinical annotations."""
+    from .handlers import clinvar
+
+    vdb = VariantDB(Path(db) if db else None)
+    try:
+        counts = clinvar.import_gene(
+            vdb,
+            gene,
+            data_file=variant_summary_path,
+            assembly=assembly,
+            include_all_types=include_all_types,
+        )
+    except clinvar.HandlerError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+    click.echo(
+        f"Scanned ClinVar rows: {counts['rows']}   matched rows: {counts['matched_rows']}   "
+        f"clinical annotations: {counts['annotations']}   aliases: {counts['aliases']}"
+    )
+
+
 @main.command(name="vep-run")
 @click.option("--db", type=click.Path(), default=None, help="Database path")
+@click.option("--gene", "-g", default=None, help="Restrict to pending jobs for one enumerated gene")
 @click.option("--limit", type=int, default=None, help="Max pending jobs to claim this run")
 @click.option("--plugin", "plugins", multiple=True,
               help="VEP --plugin argument; repeatable. Overrides VEP_PLUGINS env.")
 @click.option("--keep-outputs", is_flag=True)
-def vep_run(db: str, limit: int, plugins: tuple, keep_outputs: bool):
+def vep_run(db: str, gene: str, limit: int, plugins: tuple, keep_outputs: bool):
     """Drain pending vep jobs by invoking VEP once on a generated VCF.
 
     Requires VEP installed (`brew install ensembl-vep`) and a cache (`~/.vep` by default).
@@ -718,7 +1235,13 @@ def vep_run(db: str, limit: int, plugins: tuple, keep_outputs: bool):
 
     vdb = VariantDB(Path(db) if db else None)
     try:
-        result = vep.run_batch(vdb, limit=limit, plugins=list(plugins) or None, keep_outputs=keep_outputs)
+        result = vep.run_batch(
+            vdb,
+            limit=limit,
+            gene_filter=gene,
+            plugins=list(plugins) or None,
+            keep_outputs=keep_outputs,
+        )
     except vep.HandlerError as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
@@ -728,13 +1251,14 @@ def vep_run(db: str, limit: int, plugins: tuple, keep_outputs: bool):
 
 @main.command(name="alphafold-run")
 @click.option("--db", type=click.Path(), default=None, help="Database path")
+@click.option("--gene", "-g", default=None, help="Restrict to pending jobs for one enumerated gene")
 @click.option("--limit", type=int, default=None, help="Max pending jobs to claim this run")
-def alphafold_run(db: str, limit: int):
+def alphafold_run(db: str, gene: str, limit: int):
     """Drain pending alphafold jobs via AlphaFold DB pLDDT JSON files."""
     from .handlers import alphafold
 
     vdb = VariantDB(Path(db) if db else None)
-    result = alphafold.run_batch(vdb, limit=limit)
+    result = alphafold.run_batch(vdb, limit=limit, gene_filter=gene)
     click.echo(
         f"Claimed {result['claimed']}   annotated: {result['annotated']}   "
         f"failed: {result['failed']}"

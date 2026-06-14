@@ -110,22 +110,24 @@ def export_gene(
     """Write a normalized gene export.
 
     ``layout='wide'`` writes one row per canonical variant with namespaced feature
-    columns. ``layout='long'`` writes one row per feature field and is useful for
-    auditing where feature families live.
+    columns. ``layout='transcript-wide'`` writes one row per variant/transcript
+    consequence. ``layout='long'`` writes one row per feature field and is useful
+    for auditing where feature families live.
     """
     selected_groups = parse_groups(groups)
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    if layout == "wide":
+    if layout in {"wide", "transcript-wide"}:
         rows, fieldnames = build_wide_rows(
             db,
             gene,
             groups=selected_groups,
             include_provenance=include_provenance,
+            row_grain="transcript" if layout == "transcript-wide" else "variant",
         )
         _write_csv(output, rows, fieldnames)
-        return {"layout": "wide", "variants": len(rows), "columns": len(fieldnames), "path": output}
+        return {"layout": layout, "variants": len(rows), "columns": len(fieldnames), "path": output}
 
     if layout == "long":
         rows = list(iter_long_rows(db, gene, groups=selected_groups))
@@ -141,15 +143,21 @@ def build_wide_rows(
     *,
     groups: Optional[set[str]] = None,
     include_provenance: bool = False,
+    row_grain: str = "variant",
 ) -> tuple[list[dict], list[str]]:
-    """Build one-row-per-variant export rows and field names."""
+    """Build wide export rows and field names."""
     selected = groups or set(FEATURE_GROUPS)
-    rows = _base_variant_rows(db, gene)
+    if row_grain == "variant":
+        rows = _base_variant_rows(db, gene)
+    elif row_grain == "transcript":
+        rows = _base_transcript_rows(db, gene)
+    else:
+        raise ExportError(f"Unknown wide export row grain: {row_grain!r}")
     if not rows:
         return [], list(BASE_COLUMNS)
 
     fieldnames = list(BASE_COLUMNS)
-    by_variant = {row["variant_id"]: row for row in rows}
+    by_variant = _rows_by_variant(rows)
     _add_alias_columns(db, gene, by_variant)
 
     if "gene_constraint" in selected:
@@ -163,7 +171,14 @@ def build_wide_rows(
     if "splice" in selected:
         _add_splice(db, gene, by_variant, fieldnames, include_provenance=include_provenance)
     if "expression" in selected:
-        _add_expression(db, gene, by_variant, fieldnames, include_provenance=include_provenance)
+        _add_expression(
+            db,
+            gene,
+            by_variant,
+            fieldnames,
+            include_provenance=include_provenance,
+            transcript_scoped=row_grain == "transcript",
+        )
     if "structure" in selected:
         _add_structure(db, gene, by_variant, fieldnames, include_provenance=include_provenance)
     if "conservation" in selected:
@@ -389,7 +404,76 @@ def _base_variant_rows(db, gene: str) -> list[dict]:
     return [dict(row) for row in cur.fetchall()]
 
 
-def _add_alias_columns(db, gene: str, by_variant: dict[int, dict]) -> None:
+def _base_transcript_rows(db, gene: str) -> list[dict]:
+    sql = """
+    SELECT
+        ? AS gene,
+        v.id AS variant_id,
+        v.chromosome,
+        v.position,
+        v.ref,
+        v.alt,
+        v.variant_type,
+        v.ca_id,
+        v.vrs_id,
+        v.hgvs_g,
+        c.transcript_id,
+        c.consequence,
+        c.hgvs_c,
+        c.hgvs_p,
+        c.aa_pos,
+        c.aa_ref,
+        c.aa_alt,
+        c.codon_pos,
+        c.codon_ref,
+        c.codon_alt,
+        c.source AS consequence_source,
+        c.is_canonical,
+        c.is_mane_select,
+        c.is_mane_plus_clinical,
+        '' AS "aliases.rsid",
+        '' AS "aliases.clinvar_vcv",
+        '' AS "aliases.gnomad_id"
+    FROM variants v
+    JOIN variant_consequences c ON c.variant_id = v.id
+    WHERE UPPER(c.gene_symbol) = ?
+      AND (
+          c.source = 'enumerated'
+          OR NOT EXISTS (
+              SELECT 1
+              FROM variant_consequences ce
+              WHERE ce.variant_id = v.id
+                AND UPPER(ce.gene_symbol) = ?
+                AND ce.source = 'enumerated'
+          )
+      )
+    ORDER BY
+        CASE
+            WHEN v.chromosome IN ('X', 'x') THEN 23
+            WHEN v.chromosome IN ('Y', 'y') THEN 24
+            WHEN v.chromosome IN ('M', 'MT', 'm', 'mt') THEN 25
+            ELSE CAST(v.chromosome AS INTEGER)
+        END,
+        v.position,
+        v.ref,
+        v.alt,
+        c.is_mane_select DESC,
+        c.is_canonical DESC,
+        c.transcript_id,
+        c.source
+    """
+    cur = db.conn.execute(sql, [gene.upper(), gene.upper(), gene.upper()])
+    return [dict(row) for row in cur.fetchall()]
+
+
+def _rows_by_variant(rows: list[dict]) -> dict[int, list[dict]]:
+    grouped: dict[int, list[dict]] = defaultdict(list)
+    for row in rows:
+        grouped[row["variant_id"]].append(row)
+    return grouped
+
+
+def _add_alias_columns(db, gene: str, by_variant: dict[int, list[dict]]) -> None:
     sql = """
     WITH gene_vars AS (
         SELECT DISTINCT variant_id
@@ -407,8 +491,7 @@ def _add_alias_columns(db, gene: str, by_variant: dict[int, dict]) -> None:
         grouped[(row["variant_id"], row["alias_type"])].append(row["alias_value"])
     for (variant_id, alias_type), values in grouped.items():
         col = f"aliases.{alias_type}"
-        row = by_variant.get(variant_id)
-        if row is not None:
+        for row in by_variant.get(variant_id, []):
             row[col] = "|".join(_unique(values))
 
 
@@ -444,54 +527,47 @@ def _add_gene_constraint(
 def _add_pathogenicity(
     db,
     gene: str,
-    by_variant: dict[int, dict],
+    by_variant: dict[int, list[dict]],
     fieldnames: list[str],
     *,
     include_provenance: bool,
 ) -> None:
     for row in _query_gene_annotation(db, gene, "annotations_pathogenicity p", "p.*"):
         prefix = _versioned_prefix("pathogenicity", row["predictor"], row["predictor_version"])
-        dest = by_variant.get(row["variant_id"])
-        if dest is None:
-            continue
-        _set(dest, fieldnames, f"{prefix}.score", row["score"])
-        _set(dest, fieldnames, f"{prefix}.rank_score", row["rank_score"])
-        _set(dest, fieldnames, f"{prefix}.category", row["category"])
-        if include_provenance:
-            _set(dest, fieldnames, f"{prefix}.source", row["source"])
+        for dest in by_variant.get(row["variant_id"], []):
+            _set(dest, fieldnames, f"{prefix}.score", row["score"])
+            _set(dest, fieldnames, f"{prefix}.rank_score", row["rank_score"])
+            _set(dest, fieldnames, f"{prefix}.category", row["category"])
+            if include_provenance:
+                _set(dest, fieldnames, f"{prefix}.source", row["source"])
 
 
 def _add_population(
     db,
     gene: str,
-    by_variant: dict[int, dict],
+    by_variant: dict[int, list[dict]],
     fieldnames: list[str],
     *,
     include_provenance: bool,
 ) -> None:
     for row in _query_gene_annotation(db, gene, "annotations_population p", "p.*"):
         prefix = f"population.{_safe_component(row['dataset'])}.{_safe_component(row['pop'])}"
-        dest = by_variant.get(row["variant_id"])
-        if dest is None:
-            continue
-        _set(dest, fieldnames, f"{prefix}.af", row["af"])
-        _set(dest, fieldnames, f"{prefix}.ac", row["ac"])
-        _set(dest, fieldnames, f"{prefix}.an", row["an"])
-        _set(dest, fieldnames, f"{prefix}.homozygotes", row["n_homozygotes"])
-        _set(dest, fieldnames, f"{prefix}.filter_status", row["filter_status"])
-        if include_provenance:
-            _set(dest, fieldnames, f"{prefix}.source", row["source"])
+        for dest in by_variant.get(row["variant_id"], []):
+            _set(dest, fieldnames, f"{prefix}.af", row["af"])
+            _set(dest, fieldnames, f"{prefix}.ac", row["ac"])
+            _set(dest, fieldnames, f"{prefix}.an", row["an"])
+            _set(dest, fieldnames, f"{prefix}.homozygotes", row["n_homozygotes"])
+            _set(dest, fieldnames, f"{prefix}.filter_status", row["filter_status"])
+            if include_provenance:
+                _set(dest, fieldnames, f"{prefix}.source", row["source"])
 
 
-def _add_clinical(db, gene: str, by_variant: dict[int, dict], fieldnames: list[str]) -> None:
+def _add_clinical(db, gene: str, by_variant: dict[int, list[dict]], fieldnames: list[str]) -> None:
     grouped: dict[tuple[int, str], list[dict]] = defaultdict(list)
     for row in _query_gene_annotation(db, gene, "annotations_clinical c", "c.*"):
         grouped[(row["variant_id"], row["source"])].append(dict(row))
 
     for (variant_id, source), rows in grouped.items():
-        dest = by_variant.get(variant_id)
-        if dest is None:
-            continue
         rows = sorted(
             rows,
             key=lambda r: (
@@ -501,18 +577,19 @@ def _add_clinical(db, gene: str, by_variant: dict[int, dict], fieldnames: list[s
             ),
         )
         prefix = f"clinical.{_safe_component(source)}"
-        _set(dest, fieldnames, f"{prefix}.classification", "|".join(_unique(r.get("classification") for r in rows)))
-        _set(dest, fieldnames, f"{prefix}.review_status", "|".join(_unique(r.get("review_status") for r in rows)))
-        _set(dest, fieldnames, f"{prefix}.stars_max", max((r.get("stars") or 0 for r in rows), default=None))
-        _set(dest, fieldnames, f"{prefix}.last_evaluated_max", max((r.get("last_evaluated") or "" for r in rows), default=""))
-        _set(dest, fieldnames, f"{prefix}.record_ids", "|".join(_unique(r.get("record_id") for r in rows)))
-        _set(dest, fieldnames, f"{prefix}.conditions", "|".join(_unique(r.get("conditions") for r in rows)))
+        for dest in by_variant.get(variant_id, []):
+            _set(dest, fieldnames, f"{prefix}.classification", "|".join(_unique(r.get("classification") for r in rows)))
+            _set(dest, fieldnames, f"{prefix}.review_status", "|".join(_unique(r.get("review_status") for r in rows)))
+            _set(dest, fieldnames, f"{prefix}.stars_max", max((r.get("stars") or 0 for r in rows), default=None))
+            _set(dest, fieldnames, f"{prefix}.last_evaluated_max", max((r.get("last_evaluated") or "" for r in rows), default=""))
+            _set(dest, fieldnames, f"{prefix}.record_ids", "|".join(_unique(r.get("record_id") for r in rows)))
+            _set(dest, fieldnames, f"{prefix}.conditions", "|".join(_unique(r.get("conditions") for r in rows)))
 
 
 def _add_splice(
     db,
     gene: str,
-    by_variant: dict[int, dict],
+    by_variant: dict[int, list[dict]],
     fieldnames: list[str],
     *,
     include_provenance: bool,
@@ -520,22 +597,21 @@ def _add_splice(
     for row in _query_gene_annotation(db, gene, "annotations_splice s", "s.*"):
         prefix = _versioned_prefix("splice", row["predictor"], row["predictor_version"])
         prefix = f"{prefix}.{_safe_component(row['score_type'])}"
-        dest = by_variant.get(row["variant_id"])
-        if dest is None:
-            continue
-        _set(dest, fieldnames, f"{prefix}.score", row["score"])
-        _set(dest, fieldnames, f"{prefix}.distance", row["distance"])
-        if include_provenance:
-            _set(dest, fieldnames, f"{prefix}.source", row["source"])
+        for dest in by_variant.get(row["variant_id"], []):
+            _set(dest, fieldnames, f"{prefix}.score", row["score"])
+            _set(dest, fieldnames, f"{prefix}.distance", row["distance"])
+            if include_provenance:
+                _set(dest, fieldnames, f"{prefix}.source", row["source"])
 
 
 def _add_expression(
     db,
     gene: str,
-    by_variant: dict[int, dict],
+    by_variant: dict[int, list[dict]],
     fieldnames: list[str],
     *,
     include_provenance: bool,
+    transcript_scoped: bool = False,
 ) -> None:
     for row in _query_gene_annotation(db, gene, "annotations_expression e", "e.*"):
         components = [
@@ -547,52 +623,54 @@ def _add_expression(
         if row["transcript_id"]:
             components.append(row["transcript_id"])
         prefix = ".".join(_safe_component(c) for c in components)
-        dest = by_variant.get(row["variant_id"])
-        if dest is None:
-            continue
-        _set(dest, fieldnames, f"{prefix}.score", row["score"])
-        if include_provenance:
-            _set(dest, fieldnames, f"{prefix}.source", row["source"])
+        feature_transcript = row["transcript_id"] or ""
+        for dest in by_variant.get(row["variant_id"], []):
+            if (
+                transcript_scoped
+                and feature_transcript
+                and dest.get("transcript_id")
+                and feature_transcript != dest.get("transcript_id")
+            ):
+                continue
+            _set(dest, fieldnames, f"{prefix}.score", row["score"])
+            if include_provenance:
+                _set(dest, fieldnames, f"{prefix}.source", row["source"])
 
 
 def _add_structure(
     db,
     gene: str,
-    by_variant: dict[int, dict],
+    by_variant: dict[int, list[dict]],
     fieldnames: list[str],
     *,
     include_provenance: bool,
 ) -> None:
     for row in _query_gene_annotation(db, gene, "annotations_structure s", "s.*"):
         prefix = _versioned_prefix("structure", row["feature"], row["feature_version"])
-        dest = by_variant.get(row["variant_id"])
-        if dest is None:
-            continue
-        _set(dest, fieldnames, f"{prefix}.score", row["score"])
-        _set(dest, fieldnames, f"{prefix}.category", row["category"])
-        _set(dest, fieldnames, f"{prefix}.residue_number", row["residue_number"])
-        _set(dest, fieldnames, f"{prefix}.protein_accession", row["protein_accession"])
-        if include_provenance:
-            _set(dest, fieldnames, f"{prefix}.source", row["source"])
+        for dest in by_variant.get(row["variant_id"], []):
+            _set(dest, fieldnames, f"{prefix}.score", row["score"])
+            _set(dest, fieldnames, f"{prefix}.category", row["category"])
+            _set(dest, fieldnames, f"{prefix}.residue_number", row["residue_number"])
+            _set(dest, fieldnames, f"{prefix}.protein_accession", row["protein_accession"])
+            if include_provenance:
+                _set(dest, fieldnames, f"{prefix}.source", row["source"])
 
 
 def _add_conservation(
     db,
     gene: str,
-    by_variant: dict[int, dict],
+    by_variant: dict[int, list[dict]],
     fieldnames: list[str],
     *,
     include_provenance: bool,
 ) -> None:
     for row in _query_gene_annotation(db, gene, "annotations_conservation c", "c.*"):
         prefix = f"conservation.{_safe_component(row['metric'])}"
-        dest = by_variant.get(row["variant_id"])
-        if dest is None:
-            continue
-        _set(dest, fieldnames, f"{prefix}.score", row["score"])
-        _set(dest, fieldnames, f"{prefix}.rank_score", row["rank_score"])
-        if include_provenance:
-            _set(dest, fieldnames, f"{prefix}.source", row["source"])
+        for dest in by_variant.get(row["variant_id"], []):
+            _set(dest, fieldnames, f"{prefix}.score", row["score"])
+            _set(dest, fieldnames, f"{prefix}.rank_score", row["rank_score"])
+            if include_provenance:
+                _set(dest, fieldnames, f"{prefix}.source", row["source"])
 
 
 def _query_gene_annotation(db, gene: str, table_expr: str, select_expr: str):
@@ -728,8 +806,13 @@ def feature_schema() -> dict[str, dict]:
         },
         "expression": {
             "table": "annotations_expression",
-            "examples": ["gnomAD pext", "AbExp", "splice-site expression"],
+            "examples": ["gnomAD pext", "AbExp", "splice-site expression", "transcript-scoped pext"],
             "wide_prefix": "expression.<metric>.<dataset>.<tissue>[.<transcript>].score",
+        },
+        "isoforms": {
+            "table": "transcripts",
+            "examples": ["MANE Select, MANE Plus Clinical, canonical, and alternate coding isoforms"],
+            "wide_prefix": "use `variantfeatures export --layout transcript-wide` for one row per variant/transcript",
         },
         "structure": {
             "table": "annotations_structure",
@@ -745,6 +828,11 @@ def feature_schema() -> dict[str, dict]:
             "table": "gene_constraint",
             "examples": ["gnomAD pLI, LOEUF, missense Z"],
             "wide_prefix": "gene_constraint.<dataset>.<metric>",
+        },
+        "frameshift_proxy": {
+            "table": "frameshift_nonsense_mappings",
+            "examples": ["Frameshift amino-acid position to stop_gained SNV proxy variant_id"],
+            "wide_prefix": "use `variantfeatures frameshift-map` for mapping rows",
         },
     }
 
