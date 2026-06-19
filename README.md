@@ -72,7 +72,7 @@ The goal: give it a gene name, get a complete annotation database ready for down
 The current must-have target set is:
 
 ```text
-APOE, MYBPC3, BRCA1, BRCA2, KCNH2
+APOE, MYBPC3, BRCA1, BRCA2, KCNH2, LDLR
 ```
 
 `MYBPC3` is the canonical HGNC symbol for the cardiomyopathy gene sometimes
@@ -81,7 +81,7 @@ genes in `data/variants.db` and fill any missing coverage for this set.
 
 ```bash
 .venv/bin/python -m variantfeatures build \
-  --genes APOE,MYBPC3,BRCA1,BRCA2,KCNH2 \
+  --genes APOE,MYBPC3,BRCA1,BRCA2,KCNH2,LDLR \
   --db data/variants.db
 ```
 

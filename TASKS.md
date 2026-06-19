@@ -27,7 +27,7 @@ enumerates canonical variants into `variants` + `variant_consequences`, queues
 family-specific normalized annotations, and can run available annotators. `export`
 now defaults to normalized wide/long output with explicit feature-family prefixes.
 
-**Must-have fully populated genes:** APOE, MYBPC3, BRCA1, BRCA2, KCNH2, additive
+**Must-have fully populated genes:** APOE, MYBPC3, BRCA1, BRCA2, KCNH2, LDLR, additive
 to whatever genes are already present in `data/variants.db`. Use canonical
 `MYBPC3` for the cardiomyopathy gene; `MYPBC3` is a typo.
 

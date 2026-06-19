@@ -48,6 +48,12 @@ DATA_TABLES = (
     "frameshift_nonsense_mappings",
 )
 
+GNOMAD_R4_EXOME_DATASET = "gnomad_r4_exome_gene"
+GNOMAD_R4_GENOME_DATASET = "gnomad_r4_genome_gene"
+GNOMAD_R4_JOINT_DATASET = "gnomad_r4_joint"
+GNOMAD_R4_JOINT_SOURCE = "gnomad_gene_api_joint_v4_1"
+GNOMAD_API = "https://gnomad.broadinstitute.org/api"
+
 
 def export_gene_slice(full_db: Path, gene: str, out_path: Path) -> dict[str, Any]:
     """Write a standalone SQLite database containing only rows for ``gene``.
@@ -106,11 +112,21 @@ def export_gene_slice(full_db: Path, gene: str, out_path: Path) -> dict[str, Any
             _copy_gene_table(conn, table, gene)
 
         counts = _assert_slice_counts(conn, gene, copied_tables)
+        added_joint_rows = _add_gnomad_r4_joint_population_rows(conn, gene)
+        if "annotations_population" in counts:
+            counts["annotations_population"] = _count(
+                conn, "annotations_population", "1 = 1", []
+            )
         conn.commit()
         conn.execute("DETACH DATABASE src")
         conn.commit()
         conn.execute("VACUUM")
-        return {"gene": gene, "path": out_path, "row_counts": counts}
+        summary = {"gene": gene, "path": out_path, "row_counts": counts}
+        if added_joint_rows:
+            summary["added_rows"] = {
+                f"annotations_population.{GNOMAD_R4_JOINT_DATASET}": added_joint_rows
+            }
+        return summary
     finally:
         conn.close()
 
@@ -385,6 +401,158 @@ def _insert_select(
         """,
         params,
     )
+
+
+def _add_gnomad_r4_joint_population_rows(conn: sqlite3.Connection, gene: str) -> int:
+    """Add v4.1 all-sample joint AC/AN rows to a gene slice.
+
+    The source warehouse may already carry exome/genome rows, but joint AN is not
+    always recoverable by summing those rows when a variant is absent from genomes.
+    Use the gnomAD gene GraphQL endpoint's explicit ``variant.joint`` fields and
+    leave any existing joint rows untouched.
+    """
+
+    if not _table_exists(conn, "main", "annotations_population"):
+        return 0
+    source_v4_rows = _count(
+        conn,
+        "annotations_population",
+        "dataset IN (?, ?)",
+        [GNOMAD_R4_EXOME_DATASET, GNOMAD_R4_GENOME_DATASET],
+    )
+    if not source_v4_rows:
+        return 0
+
+    before = _count(
+        conn,
+        "annotations_population",
+        "dataset = ? AND pop = 'all'",
+        [GNOMAD_R4_JOINT_DATASET],
+    )
+    variants = {
+        f"{row['chromosome']}-{row['position']}-{row['ref']}-{row['alt']}": row["id"]
+        for row in conn.execute(
+            """
+            SELECT id, chromosome, position, ref, alt
+            FROM variants
+            WHERE chromosome IS NOT NULL
+              AND position IS NOT NULL
+              AND ref IS NOT NULL
+              AND alt IS NOT NULL
+            """
+        )
+    }
+    if not variants:
+        return 0
+
+    joint_rows = _fetch_gnomad_gene_joint_rows(gene)
+    rows = []
+    for variant_key, variant_id in variants.items():
+        joint = joint_rows.get(variant_key)
+        if not joint:
+            continue
+        an = joint.get("an")
+        ac = joint.get("ac")
+        if an is None or an <= 0 or ac is None:
+            continue
+        rows.append(
+            (
+                variant_id,
+                GNOMAD_R4_JOINT_DATASET,
+                "all",
+                ac / an,
+                ac,
+                an,
+                joint.get("n_homozygotes"),
+                joint.get("filter_status"),
+                GNOMAD_R4_JOINT_SOURCE,
+            )
+        )
+
+    conn.executemany(
+        """
+        INSERT OR IGNORE INTO annotations_population
+            (variant_id, dataset, pop, af, ac, an, n_homozygotes, filter_status, source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+    after = _count(
+        conn,
+        "annotations_population",
+        "dataset = ? AND pop = 'all'",
+        [GNOMAD_R4_JOINT_DATASET],
+    )
+    return after - before
+
+
+def _fetch_gnomad_gene_joint_rows(gene: str) -> dict[str, dict[str, Any]]:
+    """Fetch gnomAD r4/v4.1 gene variants and return explicit joint rows by key."""
+
+    import requests
+
+    query = """
+    query GeneJoint($symbol: String!, $dataset: DatasetId!) {
+      gene(gene_symbol: $symbol, reference_genome: GRCh38) {
+        variants(dataset: $dataset) {
+          variant_id
+          exome { ac an }
+          genome { ac an }
+          joint {
+            ac
+            an
+            homozygote_count
+            filters
+          }
+        }
+      }
+    }
+    """
+    response = requests.post(
+        GNOMAD_API,
+        json={"query": query, "variables": {"symbol": gene.upper(), "dataset": "gnomad_r4"}},
+        timeout=120,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if payload.get("errors"):
+        messages = "; ".join(error.get("message", "?") for error in payload["errors"])
+        raise PublishError(f"gnomAD API error while fetching {gene} joint rows: {messages}")
+
+    gene_payload = (payload.get("data") or {}).get("gene")
+    if not gene_payload:
+        raise PublishError(f"gnomAD API returned no gene payload for {gene}")
+
+    rows = {}
+    mismatches = []
+    for variant in gene_payload.get("variants") or []:
+        variant_id = variant.get("variant_id")
+        joint = variant.get("joint") or {}
+        if not variant_id or joint.get("ac") is None or joint.get("an") is None:
+            continue
+        exome = variant.get("exome") or {}
+        genome = variant.get("genome") or {}
+        expected_ac = (exome.get("ac") or 0) + (genome.get("ac") or 0)
+        if joint["ac"] != expected_ac:
+            mismatches.append((variant_id, joint["ac"], expected_ac))
+            continue
+        filters = joint.get("filters") or []
+        rows[variant_id] = {
+            "ac": int(joint["ac"]),
+            "an": int(joint["an"]),
+            "n_homozygotes": joint.get("homozygote_count"),
+            "filter_status": ",".join(filters) if filters else "PASS",
+        }
+
+    if mismatches:
+        first = ", ".join(
+            f"{vid}: joint={got} exome+genome={want}"
+            for vid, got, want in mismatches[:5]
+        )
+        raise PublishError(
+            f"gnomAD joint AC cross-check failed for {len(mismatches)} {gene} variants: {first}"
+        )
+    return rows
 
 
 def _assert_slice_counts(

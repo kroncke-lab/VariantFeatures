@@ -25,6 +25,7 @@ GNOMAD_API = "https://gnomad.broadinstitute.org/api"
 DEFAULT_RATE_LIMIT_SEC = 0.6  # gnomAD prefers ~2 req/sec or less
 DEFAULT_TIMEOUT = 60
 DEFAULT_DATASET = "gnomad_r4"
+JOINT_DATASET = "gnomad_r4_joint"
 
 # GraphQL error messages that mean "this variant simply isn't in gnomAD" — treat as
 # a silent absent, not a failure. (gnomAD returns these as `errors` not `data.variant: null`.)
@@ -71,6 +72,18 @@ query VariantQuery($variantId: String!, $dataset: DatasetId!) {
         homozygote_count
       }
       faf95 { popmax popmax_population }
+    }
+    joint {
+      ac
+      an
+      homozygote_count
+      filters
+      populations {
+        id
+        ac
+        an
+        homozygote_count
+      }
     }
   }
 }
@@ -194,6 +207,9 @@ def parse_gnomad_variant(variant: dict, *, dataset_version: str = "v4") -> Itera
     genome = variant.get("genome")
     if genome:
         yield from _per_pop_rows(genome, f"gnomad_genomes_{dataset_version}")
+    joint = variant.get("joint")
+    if joint:
+        yield from _per_pop_rows(joint, JOINT_DATASET)
 
 
 def parse_aliases(variant: dict) -> Iterable[dict]:

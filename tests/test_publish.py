@@ -11,6 +11,12 @@ from variantfeatures import publish
 from variantfeatures.cli import main
 from variantfeatures.database import VariantDB
 from variantfeatures.publish import build_manifest, export_gene_slice, upload
+from variantfeatures.publish import (
+    GNOMAD_R4_EXOME_DATASET,
+    GNOMAD_R4_GENOME_DATASET,
+    GNOMAD_R4_JOINT_DATASET,
+    GNOMAD_R4_JOINT_SOURCE,
+)
 
 
 def _seed_publish_db(db: VariantDB) -> None:
@@ -139,6 +145,104 @@ def test_export_gene_slice_copies_only_one_gene(tmp_path: Path):
             for row in conn.execute("SELECT DISTINCT gene_symbol FROM variant_consequences")
         }
         assert genes == {"KCNH2"}
+    finally:
+        conn.close()
+
+
+def test_export_gene_slice_adds_gnomad_r4_joint_rows(monkeypatch, tmp_path: Path):
+    db_path = tmp_path / "source.db"
+    db = VariantDB(db_path)
+    _seed_publish_db(db)
+    k1 = db.conn.execute(
+        "SELECT id FROM variants WHERE chromosome = '7' AND position = 150000001"
+    ).fetchone()[0]
+    k2 = db.conn.execute(
+        "SELECT id FROM variants WHERE chromosome = '7' AND position = 150000002"
+    ).fetchone()[0]
+    db.upsert_population(
+        k1,
+        GNOMAD_R4_EXOME_DATASET,
+        "all",
+        ac=10,
+        an=100,
+        af=0.1,
+        n_homozygotes=1,
+        filter_status="PASS",
+        source="gnomad_gene_api",
+    )
+    db.upsert_population(
+        k1,
+        GNOMAD_R4_GENOME_DATASET,
+        "all",
+        ac=2,
+        an=20,
+        af=0.1,
+        n_homozygotes=0,
+        filter_status="PASS",
+        source="gnomad_gene_api",
+    )
+    db.upsert_population(
+        k2,
+        GNOMAD_R4_EXOME_DATASET,
+        "all",
+        ac=4,
+        an=80,
+        af=0.05,
+        source="gnomad_gene_api",
+    )
+    db.close()
+    monkeypatch.setattr(
+        publish,
+        "_fetch_gnomad_gene_joint_rows",
+        lambda gene: {
+            "7-150000001-A-G": {
+                "ac": 12,
+                "an": 120,
+                "n_homozygotes": 1,
+                "filter_status": "PASS",
+            },
+            # Exome-only in the source rows, but explicit joint AN can still be
+            # larger because gnomAD reports joint coverage for reference calls.
+            "7-150000002-C-T": {
+                "ac": 4,
+                "an": 95,
+                "n_homozygotes": 0,
+                "filter_status": "PASS",
+            },
+        },
+    )
+
+    out_path = tmp_path / "KCNH2.db"
+    summary = export_gene_slice(db_path, "KCNH2", out_path)
+
+    conn = sqlite3.connect(out_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        assert summary["added_rows"] == {
+            f"annotations_population.{GNOMAD_R4_JOINT_DATASET}": 2
+        }
+        rows = {
+            (row["variant_id"], row["dataset"], row["pop"]): dict(row)
+            for row in conn.execute(
+                """
+                SELECT variant_id, dataset, pop, ac, an, af, n_homozygotes, source
+                FROM annotations_population
+                WHERE dataset IN (?, ?, ?)
+                """,
+                [GNOMAD_R4_EXOME_DATASET, GNOMAD_R4_GENOME_DATASET, GNOMAD_R4_JOINT_DATASET],
+            )
+        }
+        assert (k1, GNOMAD_R4_EXOME_DATASET, "all") in rows
+        assert (k1, GNOMAD_R4_GENOME_DATASET, "all") in rows
+        assert rows[(k1, GNOMAD_R4_JOINT_DATASET, "all")]["ac"] == 12
+        assert rows[(k1, GNOMAD_R4_JOINT_DATASET, "all")]["an"] == 120
+        assert rows[(k1, GNOMAD_R4_JOINT_DATASET, "all")]["af"] == 0.1
+        assert rows[(k1, GNOMAD_R4_JOINT_DATASET, "all")]["n_homozygotes"] == 1
+        assert rows[(k1, GNOMAD_R4_JOINT_DATASET, "all")]["source"] == GNOMAD_R4_JOINT_SOURCE
+
+        assert rows[(k2, GNOMAD_R4_JOINT_DATASET, "all")]["ac"] == 4
+        assert rows[(k2, GNOMAD_R4_JOINT_DATASET, "all")]["an"] == 95
+        assert rows[(k2, GNOMAD_R4_JOINT_DATASET, "all")]["af"] == 4 / 95
     finally:
         conn.close()
 

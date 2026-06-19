@@ -173,6 +173,7 @@ present in the VariantFeatures database:
 | BRCA1 | Cancer susceptibility |
 | BRCA2 | Cancer susceptibility |
 | KCNH2 | Active LQT2 target |
+| LDLR | Familial hypercholesterolemia |
 
 ### Phase 1: Cardiac Channelopathies (4 genes)
 | Gene | Syndrome | Priority |

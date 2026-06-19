@@ -35,6 +35,16 @@ SAMPLE_VARIANT = {
         "faf95": {"popmax": 1.5e-05, "popmax_population": "sas"},
     },
     "genome": None,
+    "joint": {
+        "ac": 1,
+        "an": 251260,
+        "homozygote_count": 0,
+        "filters": [],
+        "populations": [
+            {"id": "afr", "ac": 0, "an": 16252, "homozygote_count": 0},
+            {"id": "sas", "ac": 1, "an": 30000, "homozygote_count": 0},
+        ],
+    },
 }
 
 
@@ -81,10 +91,17 @@ def test_parse_gnomad_variant_emits_per_pop_rows():
     # No genome dataset present -> no rows
     assert not any(r["dataset"] == "gnomad_genomes_v4" for r in rows)
 
+    assert ("gnomad_r4_joint", "all") in by_key
+    assert by_key[("gnomad_r4_joint", "all")]["ac"] == 1
+    assert by_key[("gnomad_r4_joint", "all")]["an"] == 251260
+    assert by_key[("gnomad_r4_joint", "all")]["af"] == 1 / 251260
+    assert ("gnomad_r4_joint", "sas") in by_key
+
 
 def test_parse_gnomad_filters_are_serialized():
     payload = dict(SAMPLE_VARIANT)
     payload["exome"] = dict(SAMPLE_VARIANT["exome"], filters=["AC0", "RF"])
+    payload["joint"] = dict(SAMPLE_VARIANT["joint"], filters=["AC0", "RF"])
     rows = list(gn.parse_gnomad_variant(payload))
     assert all(r["filter_status"] == "AC0,RF" for r in rows if r["pop"] != "popmax")
 
@@ -105,6 +122,18 @@ def test_persist_writes_population_rows(db, vid):
     assert counts["aliases"] >= 1
     cur = db.conn.execute("SELECT pop, af FROM annotations_population WHERE variant_id = ? AND pop = 'sas'", [vid])
     assert dict(cur.fetchone()) == {"pop": "sas", "af": 1 / 30000}
+    cur = db.conn.execute(
+        """
+        SELECT ac, an, af
+        FROM annotations_population
+        WHERE variant_id = ? AND dataset = 'gnomad_r4_joint' AND pop = 'all'
+        """,
+        [vid],
+    )
+    row = dict(cur.fetchone())
+    assert row["ac"] == 1
+    assert row["an"] == 251260
+    assert row["af"] == 1 / 251260
 
 
 class _FakeResp:
