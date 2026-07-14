@@ -6,10 +6,11 @@ match pending jobs by joining `annotation_jobs` -> `variants` ->
 `variant_consequences` to recover `(gene_symbol, aa_ref, aa_pos, aa_alt)`,
 then convert to the AlphaMissense short form (e.g. `KCNH2 + A614V`).
 
-For per-gene UniProt resolution we use a small hardcoded map for the cardiac
-channelopathy Phase 1 genes (sufficient for the R01 work), with the option
-to extend via the `gene_uniprot` argument or `ALPHAMISSENSE_UNIPROT` env var
-(comma-separated `GENE:UNIPROT` pairs).
+For per-gene UniProt resolution we reuse the shared `BUILTIN_GENE_TO_UNIPROT`
+map from `variantfeatures.uniprot` (the single source of truth) plus a
+test-only fixture entry, with the option to extend via the `gene_uniprot`
+argument or `ALPHAMISSENSE_UNIPROT` env var (comma-separated `GENE:UNIPROT`
+pairs).
 
 File format:
     uniprot_id  protein_variant  am_pathogenicity  am_class
@@ -27,6 +28,8 @@ import os
 from pathlib import Path
 from typing import Optional
 
+from ..uniprot import BUILTIN_GENE_TO_UNIPROT
+
 
 SOURCE = "alphamissense"
 
@@ -34,50 +37,12 @@ DEFAULT_REL_PATH = Path("data") / "alphamissense" / "AlphaMissense_aa_substituti
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
-# Cardiac channelopathy genes covered out of the box. Extend as needed.
+# Genes covered out of the box. Derived from the shared resolver map in
+# `uniprot.py` (single source of truth) so a gene added there flows through
+# here automatically; only the test-fixture entry lives locally.
 _BUILTIN_GENE_TO_UNIPROT: dict[str, str] = {
-    "KCNH2": "Q12809",
-    "KCNQ1": "P51787",
-    "SCN5A": "Q14524",
-    "RYR2": "Q92736",
-    "CACNA1C": "Q13936",
-    "KCNJ2": "P63252",
-    "KCNE1": "P15382",
-    "KCNE2": "Q9Y6J6",
-    # Common ACMG SF v3.2 genes (incomplete; expand as the project moves to ACMG-81)
-    "BRCA1": "P38398",
-    "BRCA2": "P51587",
-    "TP53": "P04637",
-    "MYH7": "P12883",
-    "MYBPC3": "Q14896",
-    "TTN": "Q8WZ42",
-    "LMNA": "P02545",
-    "LDLR": "P01130",
-    "APOB": "P04114",
-    "APOE": "P02649",
-    "PCSK9": "Q8NBP7",
+    **BUILTIN_GENE_TO_UNIPROT,
     "BRAF": "P15056",  # for the test fixture
-    # ACMG SF v3.2 + amyloidosis / metabolic
-    "TTR": "P02766",     # transthyretin (familial amyloid polyneuropathy)
-    "ALPL": "P05186",    # tissue-nonspecific alkaline phosphatase (hypophosphatasia)
-    "RB1": "P06400",
-    "VHL": "P40337",
-    "ATP7B": "P35670",
-    "RYR1": "P21817",
-    "CACNA1S": "Q13698",
-    "SDHB": "P21912",
-    "SDHC": "Q99643",
-    "SDHD": "O14521",
-    "MEN1": "O00255",
-    "RET": "P07949",
-    "PTEN": "P60484",
-    "STK11": "Q15831",
-    "MUTYH": "Q9UIF7",
-    "MLH1": "P40692",
-    "MSH2": "P43246",
-    "MSH6": "P52701",
-    "PMS2": "P54278",
-    "APC": "P25054",
 }
 
 
