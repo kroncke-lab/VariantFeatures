@@ -239,16 +239,20 @@ def _load_pending_index(
     resolution_cache: dict[str, tuple[Optional[str], Optional[str]]] = {}
 
     def _resolve(gene: str) -> tuple[Optional[str], Optional[str]]:
-        if gene in resolution_cache:
-            return resolution_cache[gene]
-        if gene in overrides:
-            result: tuple[Optional[str], Optional[str]] = (overrides[gene], None)
+        g = gene.strip()
+        if not g:
+            return (None, "consequence missing gene_symbol")
+        if g in resolution_cache:
+            return resolution_cache[g]
+        if g in overrides:
+            result: tuple[Optional[str], Optional[str]] = (overrides[g], None)
         else:
             try:
-                result = (resolve_uniprot_accession(gene, timeout=timeout), None)
-            except (UniProtError, requests.RequestException) as e:
-                result = (None, f"could not resolve UniProt accession for gene {gene!r}: {e}")
-        resolution_cache[gene] = result
+                # ValueError covers json.JSONDecodeError if UniProt returns non-JSON.
+                result = (resolve_uniprot_accession(g, timeout=timeout), None)
+            except (UniProtError, requests.RequestException, ValueError) as e:
+                result = (None, f"could not resolve UniProt accession for gene {g!r}: {e}")
+        resolution_cache[g] = result
         return result
 
     by_key: dict[tuple, list[dict]] = {}

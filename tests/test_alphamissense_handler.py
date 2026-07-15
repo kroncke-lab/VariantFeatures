@@ -187,6 +187,25 @@ def test_run_batch_unknown_gene_fails_cleanly(db, am_file):
     assert "MADEUPGENE" in err and "UniProt" in err
 
 
+def test_run_batch_blank_gene_symbol_fails_without_resolution(db, am_file):
+    """A blank/whitespace gene_symbol fails cleanly, without attempting a UniProt lookup."""
+    vid = db.upsert_variant(chromosome="2", position=7, ref="A", alt="G", variant_type="SNV")
+    db.upsert_consequence(
+        variant_id=vid, transcript_id="NM_BLANK", source="enumerated",
+        gene_symbol="   ", consequence="missense_variant",
+        aa_ref="A", aa_pos=1, aa_alt="V",
+    )
+    db.enqueue_job(vid, "alphamissense")
+
+    result = am.run_batch(db, file_path=str(am_file))
+    assert result["matched"] == 0
+    assert result["failed"] == 1
+    err = db.conn.execute(
+        "SELECT error FROM annotation_jobs WHERE variant_id = ?", [vid]
+    ).fetchone()["error"]
+    assert "gene_symbol" in err
+
+
 def test_run_batch_no_pending_jobs_is_noop(db, am_file):
     result = am.run_batch(db, file_path=str(am_file))
     assert result == {"claimed": 0, "matched": 0, "failed": 0, "lines_scanned": 0}
