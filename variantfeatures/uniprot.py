@@ -1,7 +1,10 @@
 """Small UniProt resolver used by protein-level annotators.
 
-The built-in map covers the current cardiac/metabolic/amyloid grant targets and
-common ACMG genes. For any other human gene, fall back to UniProt's REST search.
+The tool is gene-agnostic: no gene list is hardcoded. Any human gene symbol is
+resolved to a reviewed UniProtKB accession via UniProt's REST search. Optional
+runtime overrides may be supplied via the `VARIANTFEATURES_UNIPROT_MAP` /
+`ALPHAMISSENSE_UNIPROT` env vars (comma-separated `GENE:ACCESSION`) or the
+`extra` argument -- e.g. to pin a specific isoform accession or to run offline.
 """
 
 from __future__ import annotations
@@ -16,60 +19,19 @@ UNIPROT_REST = "https://rest.uniprot.org/uniprotkb/search"
 DEFAULT_TIMEOUT = 30
 
 
-BUILTIN_GENE_TO_UNIPROT: dict[str, str] = {
-    "KCNH2": "Q12809",
-    "KCNQ1": "P51787",
-    "SCN5A": "Q14524",
-    "RYR2": "Q92736",
-    "CACNA1C": "Q13936",
-    "KCNJ2": "P63252",
-    "KCNE1": "P15382",
-    "KCNE2": "Q9Y6J6",
-    "BRCA1": "P38398",
-    "BRCA2": "P51587",
-    "TP53": "P04637",
-    "MYH7": "P12883",
-    "MYBPC3": "Q14896",
-    "TTN": "Q8WZ42",
-    "LMNA": "P02545",
-    "LDLR": "P01130",
-    "APOB": "P04114",
-    "APOE": "P02649",
-    "PCSK9": "Q8NBP7",
-    "TTR": "P02766",
-    "ALPL": "P05186",
-    "RB1": "P06400",
-    "VHL": "P40337",
-    "ATP7B": "P35670",
-    "RYR1": "P21817",
-    "CACNA1S": "Q13698",
-    "SDHB": "P21912",
-    "SDHC": "Q99643",
-    "SDHD": "O14521",
-    "MEN1": "O00255",
-    "RET": "P07949",
-    "PTEN": "P60484",
-    "STK11": "Q15831",
-    "MUTYH": "Q9UIF7",
-    "MLH1": "P40692",
-    "MSH2": "P43246",
-    "MSH6": "P52701",
-    "PMS2": "P54278",
-    "APC": "P25054",
-}
-
-
 class UniProtError(Exception):
     pass
 
 
 def gene_uniprot_map(extra: Optional[dict[str, str]] = None) -> dict[str, str]:
-    """Return the configured GENE -> UniProt accession map.
+    """Return configured GENE -> UniProt accession overrides (no hardcoded genes).
 
-    `VARIANTFEATURES_UNIPROT_MAP` may add or override pairs as
-    comma-separated `GENE:ACCESSION` values.
+    Overrides come from the `VARIANTFEATURES_UNIPROT_MAP` / `ALPHAMISSENSE_UNIPROT`
+    env vars (comma-separated `GENE:ACCESSION`) and the `extra` argument. Genes
+    not listed here are resolved dynamically via UniProt REST -- the tool does
+    not carry a built-in gene list.
     """
-    out = dict(BUILTIN_GENE_TO_UNIPROT)
+    out: dict[str, str] = {}
     env_pairs = os.environ.get("VARIANTFEATURES_UNIPROT_MAP") or os.environ.get("ALPHAMISSENSE_UNIPROT")
     if env_pairs:
         for pair in env_pairs.split(","):

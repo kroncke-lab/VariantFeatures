@@ -16,12 +16,14 @@ from variantfeatures.handlers import alphamissense as am
 SAMPLE_TSV = (
     "# Copyright DeepMind\n"
     "uniprot_id\tprotein_variant\tam_pathogenicity\tam_class\n"
-    # KCNH2 = Q12809 (built into the handler's gene->uniprot map)
+    # KCNH2 = Q12809 (resolved dynamically to this accession in tests)
     "Q12809\tA614V\t0.92\tlikely_pathogenic\n"
     "Q12809\tP2T\t0.30\tambiguous\n"
     "Q12809\tR5W\t0.95\tlikely_pathogenic\n"
     # An entry that's not requested by any pending job:
     "Q12809\tX9Y\t0.50\tambiguous\n"
+    # LMNA = P02545 (never hardcoded; proves gene-agnostic resolution):
+    "P02545\tR100C\t0.88\tlikely_pathogenic\n"
 )
 
 
@@ -36,6 +38,24 @@ def am_file(tmp_path: Path) -> Path:
     with gzip.open(p, "wt") as f:
         f.write(SAMPLE_TSV)
     return p
+
+
+@pytest.fixture(autouse=True)
+def offline_uniprot(monkeypatch):
+    """Keep gene->UniProt resolution offline and deterministic.
+
+    KCNH2 resolves to its real accession; any other unlisted gene is treated as
+    a UniProt REST miss so the gene-agnostic path is exercised without network.
+    """
+    known = {"KCNH2": "Q12809"}
+
+    def fake_resolve(gene, *, timeout=30, extra=None):
+        g = gene.upper()
+        if g in known:
+            return known[g]
+        raise am.UniProtError(f"No reviewed human UniProt entry found for gene {g!r}")
+
+    monkeypatch.setattr(am, "resolve_uniprot_accession", fake_resolve)
 
 
 def _add_kcnh2_variant(db, *, position, ref, alt, aa_ref, aa_pos, aa_alt, consequence="missense_variant"):
@@ -67,11 +87,9 @@ def test_resolve_file_path_env(monkeypatch, tmp_path):
     assert am.resolve_file_path() == p
 
 
-def test_gene_uniprot_map_includes_phase1_genes():
-    m = am.gene_uniprot_map()
-    assert m["KCNH2"] == "Q12809"
-    assert m["KCNQ1"] == "P51787"
-    assert m["BRAF"] == "P15056"
+def test_gene_uniprot_map_has_no_hardcoded_genes():
+    # The handler is gene-agnostic: the override map is empty unless configured.
+    assert am.gene_uniprot_map() == {}
 
 
 def test_gene_uniprot_map_env_override(monkeypatch):
@@ -116,6 +134,25 @@ def test_run_batch_matches_pending_missense_jobs(db, am_file):
     assert statuses[v_no_match][0] == "failed"
 
 
+def test_run_batch_resolves_arbitrary_gene_dynamically(db, am_file):
+    """Any gene works without being hardcoded -- here LMNA via an explicit override."""
+    vid = db.upsert_variant(chromosome="1", position=500, ref="C", alt="T", variant_type="SNV")
+    db.upsert_consequence(
+        variant_id=vid, transcript_id="NM_LMNA", source="enumerated",
+        gene_symbol="LMNA", consequence="missense_variant",
+        aa_ref="R", aa_pos=100, aa_alt="C",
+    )
+    db.enqueue_job(vid, "alphamissense")
+
+    result = am.run_batch(db, file_path=str(am_file), gene_uniprot={"LMNA": "P02545"})
+    assert result["matched"] == 1
+    row = dict(db.conn.execute(
+        "SELECT score, category FROM annotations_pathogenicity WHERE variant_id = ?", [vid]
+    ).fetchone())
+    assert row["score"] == 0.88
+    assert row["category"] == "P"
+
+
 def test_run_batch_marks_non_missense_jobs_failed(db, am_file):
     """AM only covers missense; stop_gained jobs should be failed without scanning the file."""
     vid = _add_kcnh2_variant(db, position=10, ref="A", alt="T",
@@ -148,6 +185,25 @@ def test_run_batch_unknown_gene_fails_cleanly(db, am_file):
     cur = db.conn.execute("SELECT error FROM annotation_jobs WHERE variant_id = ?", [vid])
     err = cur.fetchone()["error"]
     assert "MADEUPGENE" in err and "UniProt" in err
+
+
+def test_run_batch_blank_gene_symbol_fails_without_resolution(db, am_file):
+    """A blank/whitespace gene_symbol fails cleanly, without attempting a UniProt lookup."""
+    vid = db.upsert_variant(chromosome="2", position=7, ref="A", alt="G", variant_type="SNV")
+    db.upsert_consequence(
+        variant_id=vid, transcript_id="NM_BLANK", source="enumerated",
+        gene_symbol="   ", consequence="missense_variant",
+        aa_ref="A", aa_pos=1, aa_alt="V",
+    )
+    db.enqueue_job(vid, "alphamissense")
+
+    result = am.run_batch(db, file_path=str(am_file))
+    assert result["matched"] == 0
+    assert result["failed"] == 1
+    err = db.conn.execute(
+        "SELECT error FROM annotation_jobs WHERE variant_id = ?", [vid]
+    ).fetchone()["error"]
+    assert "gene_symbol" in err
 
 
 def test_run_batch_no_pending_jobs_is_noop(db, am_file):

@@ -25,6 +25,12 @@ def test_alphafold_run_batch_writes_plddt(db, monkeypatch):
     )
     db.enqueue_job(vid, "alphafold")
 
+    # Gene->UniProt is resolved dynamically (no hardcoded map); stub it offline.
+    monkeypatch.setattr(
+        alphafold,
+        "resolve_uniprot_accession",
+        lambda gene, timeout=30, extra=None: "Q12809",
+    )
     monkeypatch.setattr(
         alphafold,
         "fetch_predictions",

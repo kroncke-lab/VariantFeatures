@@ -6,11 +6,11 @@ match pending jobs by joining `annotation_jobs` -> `variants` ->
 `variant_consequences` to recover `(gene_symbol, aa_ref, aa_pos, aa_alt)`,
 then convert to the AlphaMissense short form (e.g. `KCNH2 + A614V`).
 
-For per-gene UniProt resolution we reuse the shared `BUILTIN_GENE_TO_UNIPROT`
-map from `variantfeatures.uniprot` (the single source of truth) plus a
-test-only fixture entry, with the option to extend via the `gene_uniprot`
-argument or `ALPHAMISSENSE_UNIPROT` env var (comma-separated `GENE:UNIPROT`
-pairs).
+Per-gene UniProt resolution is gene-agnostic: each gene symbol is resolved to a
+reviewed UniProtKB accession via `variantfeatures.uniprot.resolve_uniprot_accession`
+(UniProt REST), with optional overrides via the `gene_uniprot` argument or the
+`ALPHAMISSENSE_UNIPROT` env var (comma-separated `GENE:UNIPROT` pairs). No gene
+list is hardcoded.
 
 File format:
     uniprot_id  protein_variant  am_pathogenicity  am_class
@@ -28,22 +28,16 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from ..uniprot import BUILTIN_GENE_TO_UNIPROT
+import requests
+
+from ..uniprot import UniProtError, resolve_uniprot_accession
 
 
 SOURCE = "alphamissense"
+DEFAULT_TIMEOUT = 30
 
 DEFAULT_REL_PATH = Path("data") / "alphamissense" / "AlphaMissense_aa_substitutions.tsv.gz"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-
-
-# Genes covered out of the box. Derived from the shared resolver map in
-# `uniprot.py` (single source of truth) so a gene added there flows through
-# here automatically; only the test-fixture entry lives locally.
-_BUILTIN_GENE_TO_UNIPROT: dict[str, str] = {
-    **BUILTIN_GENE_TO_UNIPROT,
-    "BRAF": "P15056",  # for the test fixture
-}
 
 
 class HandlerError(Exception):
@@ -68,8 +62,13 @@ def file_present(file_path: Optional[str] = None) -> bool:
 
 
 def gene_uniprot_map(extra: Optional[dict[str, str]] = None) -> dict[str, str]:
-    """Return GENE -> UniProt accession map. Pulls in env-configured overrides."""
-    out = dict(_BUILTIN_GENE_TO_UNIPROT)
+    """Return GENE -> UniProt accession *overrides* (no hardcoded gene list).
+
+    Overrides come from the `ALPHAMISSENSE_UNIPROT` env var and the `extra`
+    argument. Genes not listed here are resolved dynamically via UniProt REST
+    (see `run_batch`), so the handler works for any gene without configuration.
+    """
+    out: dict[str, str] = {}
     env_pairs = os.environ.get("ALPHAMISSENSE_UNIPROT")
     if env_pairs:
         for pair in env_pairs.split(","):
@@ -95,8 +94,12 @@ def run_batch(
     progress_every: int = 5_000_000,
     progress_callback=None,
     gene_uniprot: Optional[dict[str, str]] = None,
+    timeout: int = DEFAULT_TIMEOUT,
 ) -> dict:
     """Drain pending alphamissense jobs by single-pass over the AM TSV.
+
+    Gene symbols are resolved to UniProt accessions dynamically (UniProt REST),
+    honouring `gene_uniprot` / `ALPHAMISSENSE_UNIPROT` overrides first.
 
     Returns: {"claimed": int, "matched": int, "failed": int, "lines_scanned": int}
     """
@@ -112,7 +115,8 @@ def run_batch(
         db,
         limit=limit,
         gene_filter=gene_filter,
-        gene_uniprot=gene_uniprot_map(gene_uniprot),
+        overrides=gene_uniprot_map(gene_uniprot),
+        timeout=timeout,
     )
     if not pending["by_key"]:
         # Either no pending jobs, or none of them matched a known gene -> mark them failed.
@@ -197,13 +201,15 @@ def _load_pending_index(
     *,
     limit: Optional[int],
     gene_filter: Optional[str],
-    gene_uniprot: dict[str, str],
+    overrides: dict[str, str],
+    timeout: int,
 ) -> dict:
     """Claim pending alphamissense jobs and index them by (uniprot, AM-style variant).
 
-    Jobs whose gene_symbol isn't in the uniprot map are returned in the
-    'unmappable' list so the caller can mark them failed without scanning the
-    big TSV.
+    Each gene symbol is resolved to a UniProt accession -- using `overrides`
+    first, then UniProt REST -- so the handler is gene-agnostic. Jobs whose gene
+    can't be resolved (or that aren't missense) are returned in the 'unmappable'
+    list so the caller can fail them without scanning the big TSV.
     """
     jobs = db.claim_pending_jobs(
         source=SOURCE,
@@ -229,6 +235,26 @@ def _load_pending_index(
         ids,
     )
 
+    # Resolve each distinct gene once; cache accession-or-failure-reason.
+    resolution_cache: dict[str, tuple[Optional[str], Optional[str]]] = {}
+
+    def _resolve(gene: str) -> tuple[Optional[str], Optional[str]]:
+        g = gene.strip()
+        if not g:
+            return (None, "consequence missing gene_symbol")
+        if g in resolution_cache:
+            return resolution_cache[g]
+        if g in overrides:
+            result: tuple[Optional[str], Optional[str]] = (overrides[g], None)
+        else:
+            try:
+                # ValueError covers json.JSONDecodeError if UniProt returns non-JSON.
+                result = (resolve_uniprot_accession(g, timeout=timeout), None)
+            except (UniProtError, requests.RequestException, ValueError) as e:
+                result = (None, f"could not resolve UniProt accession for gene {g!r}: {e}")
+        resolution_cache[g] = result
+        return result
+
     by_key: dict[tuple, list[dict]] = {}
     unmappable: list[dict] = []
     for r in cur.fetchall():
@@ -240,9 +266,9 @@ def _load_pending_index(
             unmappable.append(d)
             continue
         gene = (d.get("gene_symbol") or "").upper()
-        uniprot = gene_uniprot.get(gene)
+        uniprot, reason = _resolve(gene)
         if not uniprot:
-            d["_reason"] = f"no UniProt mapping for gene {gene!r} (extend ALPHAMISSENSE_UNIPROT)"
+            d["_reason"] = reason or f"no UniProt accession for gene {gene!r}"
             unmappable.append(d)
             continue
         if not (d.get("aa_ref") and d.get("aa_pos") and d.get("aa_alt")):
