@@ -17,8 +17,12 @@ The goal is: `variantfeatures build --gene KCNH2` → SQLite database with all p
 | REVEL | ✅ Done | 6.1GB TSV, ensemble missense scores |
 | CADD | ✅ Done | REST API, deleteriousness scores |
 | ClinVar | ✅ Done | Classifications, review status |
-| gnomAD | ⚠️ Fetcher exists | Population frequencies via GraphQL |
-| AlphaFold | ❌ Planned | 3D structure, pLDDT confidence |
+| gnomAD | ✅ Done | Population frequencies via GraphQL, wired through `build` |
+| AlphaFold | ✅ Done | Per-residue pLDDT via AlphaFold DB |
+
+Additional handlers/importers live in `variantfeatures/handlers/`: MyVariant/dbNSFP,
+gnomAD constraint (pLI/LOEUF), VEP plugins (SpliceAI, dbscSNV, MaxEntScan, LOFTEE,
+NMD), ANNOVAR, gnomAD pext, AbSplice/AbExp, and ClinGen.
 
 ### Current KCNH2 Coverage
 - 22,021 variants with AlphaMissense scores
@@ -29,18 +33,28 @@ The goal is: `variantfeatures build --gene KCNH2` → SQLite database with all p
 ```
 VariantFeatures/
 ├── variantfeatures/
-│   ├── cli.py              # Command-line interface
-│   ├── database.py         # SQLite operations (upsert, query, export)
-│   └── fetchers/
-│       ├── alphamissense.py # AlphaMissense pathogenicity (TSV)
-│       ├── revel.py         # REVEL ensemble scores (TSV)
-│       ├── cadd.py          # CADD deleteriousness (REST API)
-│       ├── clinvar.py       # ClinVar classifications (XML)
-│       ├── gnomad.py        # Population frequencies (GraphQL)
-│       └── lof.py           # Loss-of-function annotations
+│   ├── cli.py               # Command-line interface (all subcommands)
+│   ├── database.py          # Normalized SQLite schema + operations
+│   ├── build.py             # Orchestrates enumerate → queue → run per gene
+│   ├── enumerate.py         # Enumerates coding SNVs per transcript
+│   ├── identity.py          # Canonical GRCh38 variant identity / normalization
+│   ├── transcripts.py       # Transcript/isoform selection (MANE/canonical)
+│   ├── uniprot.py           # Gene → UniProt resolution
+│   ├── frameshift.py        # Frameshift → stop-gained proxy mapping
+│   ├── normalized_export.py # Wide / transcript-wide / long feature export
+│   ├── publish.py           # Per-gene SQLite slices + Azure Blob publish
+│   ├── worker.py            # Annotation job-queue worker
+│   ├── fetchers/            # Low-level source access (used by handlers)
+│   │   ├── alphamissense.py revel.py cadd.py clinvar.py gnomad.py lof.py
+│   └── handlers/            # Normalized, queue-driven annotation handlers
+│       ├── alphamissense.py revel.py cadd.py clinvar.py gnomad.py
+│       ├── gnomad_constraint.py myvariant.py alphafold.py vep.py annovar.py
+│       ├── absplice.py pext.py clingen_ar.py nmd_rules.py nmd_external.py
+│       └── tabular_utils.py
 ├── scripts/
 │   └── full_gene_pipeline.sh # End-to-end per-gene annotation pipeline
-├── data/
+├── tests/                    # pytest suite (pytest.ini: testpaths = tests)
+├── data/                     # Generated SQLite + cached sources (gitignored)
 │   ├── variants.db          # Main SQLite database
 │   ├── alphamissense/       # AlphaMissense TSV (~1.1GB)
 │   └── revel/               # REVEL data (~6.1GB uncompressed)

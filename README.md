@@ -219,23 +219,38 @@ prints the blob paths, hashes, and `latest.json` diff without contacting Azure.
 ```
 VariantFeatures/
 ├── variantfeatures/
-│   ├── cli.py              # Command-line interface
-│   ├── database.py         # SQLite operations
-│   ├── frameshift.py       # Frameshift-to-nonsense proxy mapping
-│   └── fetchers/
-│       ├── alphamissense.py # ~1.1GB TSV
-│       ├── revel.py         # ~6.1GB TSV
-│       ├── cadd.py          # REST API
-│       ├── clinvar.py       # Bulk XML
-│       ├── gnomad.py        # GraphQL API
-│       └── lof.py           # LOFTEE annotations
+│   ├── cli.py               # Command-line interface (all subcommands)
+│   ├── database.py          # Normalized SQLite schema + operations
+│   ├── build.py             # Orchestrates enumerate → queue → run per gene
+│   ├── enumerate.py         # Enumerates coding SNVs per transcript
+│   ├── identity.py          # Canonical GRCh38 variant identity / normalization
+│   ├── transcripts.py       # Transcript/isoform selection (MANE/canonical)
+│   ├── uniprot.py           # Gene → UniProt resolution
+│   ├── frameshift.py        # Frameshift → stop-gained proxy mapping
+│   ├── normalized_export.py # Wide / transcript-wide / long feature export
+│   ├── publish.py           # Per-gene SQLite slices + Azure Blob publish
+│   ├── worker.py            # Annotation job-queue worker
+│   ├── fetchers/            # Low-level source access (used by handlers)
+│   │   ├── alphamissense.py # AlphaMissense TSV
+│   │   ├── revel.py         # REVEL TSV
+│   │   ├── cadd.py          # CADD REST API
+│   │   ├── clinvar.py       # ClinVar summary
+│   │   ├── gnomad.py        # gnomAD GraphQL API
+│   │   └── lof.py           # LOFTEE / NMD helpers
+│   └── handlers/            # Normalized, queue-driven annotation handlers
+│       ├── alphamissense.py revel.py cadd.py clinvar.py gnomad.py
+│       ├── gnomad_constraint.py myvariant.py alphafold.py vep.py annovar.py
+│       ├── absplice.py pext.py clingen_ar.py nmd_rules.py nmd_external.py
+│       └── tabular_utils.py
 ├── scripts/
 │   └── full_gene_pipeline.sh # End-to-end per-gene annotation pipeline
-├── data/
-│   ├── variants.db          # Local generated SQLite database, ignored by git
-│   ├── alphamissense/       # Cached TSV
-│   └── revel/               # Cached TSV
-└── PIPELINE.md              # Full workflow docs
+├── tests/                    # pytest suite (see pytest.ini: testpaths = tests)
+├── examples/                 # Small sample inputs/outputs
+├── data/                     # Generated SQLite + cached source files (gitignored)
+│   ├── variants.db           # Local generated SQLite database
+│   ├── alphamissense/        # Cached TSV
+│   └── revel/                # Cached TSV
+└── PIPELINE.md               # Full workflow docs
 ```
 
 ## Data Sources & Sizes
@@ -310,7 +325,19 @@ Literature → GeneVariantFetcher → VariantFeatures → BayesianPenetranceEsti
 ```bash
 git clone https://github.com/kroncke-lab/VariantFeatures.git
 cd VariantFeatures
-.venv/bin/python -m pip install -e .
+
+# Create the virtualenv the commands in this README assume (Python 3.11+)
+python3.12 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+
+# Install the package. Extras: [dev] adds the test suite, [azure] adds publishing.
+.venv/bin/python -m pip install -e '.[dev]'
+```
+
+Confirm the install by running the test suite:
+
+```bash
+.venv/bin/python -m pytest
 ```
 
 ## License

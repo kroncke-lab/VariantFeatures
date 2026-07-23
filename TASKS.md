@@ -48,7 +48,7 @@ to whatever genes are already present in `data/variants.db`. Use canonical
 **What's needed:**
 - Download AlphaMissense data file (~4GB): `AlphaMissense_aa_substitutions.tsv.gz`
 - Cache location: `data/alphamissense/`
-- Run: `/usr/bin/python3 run_cli.py build -g KCNH2 --sources alphamissense`
+- Run: `.venv/bin/python -m variantfeatures build -g KCNH2 --sources alphamissense`
 
 **Verification**
 ```bash
@@ -56,7 +56,7 @@ to whatever genes are already present in `data/variants.db`. Use canonical
 ls -lh data/alphamissense/AlphaMissense_aa_substitutions.tsv.gz
 
 # 2. Fetcher works
-/usr/bin/python3 -c "from variantfeatures.fetchers.alphamissense import fetch_alphamissense; print(list(fetch_alphamissense('KCNH2'))[:3])"
+.venv/bin/python -c "from variantfeatures.fetchers.alphamissense import fetch_alphamissense; print(list(fetch_alphamissense('KCNH2'))[:3])"
 
 # 3. DB has scores
 sqlite3 data/variants.db "SELECT COUNT(DISTINCT p.variant_id) FROM annotations_pathogenicity p JOIN variant_consequences c ON c.variant_id=p.variant_id WHERE c.gene_symbol='KCNH2' AND p.predictor='alphamissense'"
@@ -79,12 +79,12 @@ sqlite3 data/variants.db "SELECT COUNT(DISTINCT p.variant_id) FROM annotations_p
 
 **What's needed:**
 - Network access to gnomAD API (`https://gnomad.broadinstitute.org/api`)
-- Run: `/usr/bin/python3 run_cli.py build -g KCNH2 --sources gnomad`
+- Run: `.venv/bin/python -m variantfeatures build -g KCNH2 --sources gnomad`
 
 **Verification**
 ```bash
 # 1. Fetcher returns data
-/usr/bin/python3 -c "from variantfeatures.fetchers.gnomad import fetch_gnomad; import itertools; print(list(itertools.islice(fetch_gnomad('KCNH2'), 5)))"
+.venv/bin/python -c "from variantfeatures.fetchers.gnomad import fetch_gnomad; import itertools; print(list(itertools.islice(fetch_gnomad('KCNH2'), 5)))"
 
 # 2. DB has AF values
 sqlite3 data/variants.db "SELECT c.hgvs_p, pop.af FROM annotations_population pop JOIN variant_consequences c ON c.variant_id=pop.variant_id WHERE c.gene_symbol='KCNH2' AND pop.pop='all' LIMIT 5"
@@ -112,26 +112,21 @@ sqlite3 data/variants.db "SELECT c.hgvs_p, pop.af FROM annotations_population po
 
 ## Task 5: Phase 1 Gene Validation
 
-**Status:** Partially complete — ClinVar loaded, awaiting AlphaMissense/gnomAD data
+**Status:** KCNH2 fully populated; extend coverage to remaining Phase 1 + must-have genes
 
-**Current Coverage:**
-```
-Gene       Total    ClinVar    AlphaMissense   gnomAD     REVEL     
-----------------------------------------------------------------------
-KCNH2      699      699        0               0          0         
-SCN5A      654      654        0               0          0         
-KCNQ1      394      394        0               0          0         
-RYR2       376      376        0               0          0         
-```
+**Current Coverage:** ClinVar is loaded for all Phase 1 genes; AlphaMissense,
+gnomAD, and REVEL are now populated. See the "Current Coverage (KCNH2)" table in
+[README.md](README.md) for authoritative per-source counts, and check live
+numbers with `.venv/bin/python -m variantfeatures stats`.
 
 **What's done:**
 - ClinVar data loaded for all Phase 1 genes ✅
+- AlphaMissense, gnomAD, and REVEL populated for KCNH2 ✅
 - Export pipeline working ✅ (e.g., `data/exports/kcnh2_features.csv`)
 
-**What's needed:**
-- Download and load AlphaMissense data
-- Run gnomAD fetcher (needs network)
-- Implement and run REVEL fetcher
+**Remaining:**
+- Confirm per-source coverage across the remaining Phase 1 genes (SCN5A, KCNQ1, RYR2)
+- Extend coverage to the must-have set: APOE, MYBPC3, BRCA1, BRCA2, LDLR
 
 ---
 
@@ -197,21 +192,20 @@ by downstream models rather than collapsed into the canonical row.
 - Added `stats` command for database coverage reporting
 - Added `export` command for CSV export
 - Added `__main__.py` for `python -m variantfeatures` support
-- Created `run_cli.py` wrapper for easier invocation
 
 **CLI Commands:**
 ```bash
 # Stats
-/usr/bin/python3 run_cli.py stats
+.venv/bin/python -m variantfeatures stats
 
 # Query (table, csv, json)
-/usr/bin/python3 run_cli.py query -g KCNH2
-/usr/bin/python3 run_cli.py query -g KCNH2 --format csv
-/usr/bin/python3 run_cli.py query -g KCNH2 --format json
+.venv/bin/python -m variantfeatures query -g KCNH2
+.venv/bin/python -m variantfeatures query -g KCNH2 --format csv
+.venv/bin/python -m variantfeatures query -g KCNH2 --format json
 
 # Export to file
-/usr/bin/python3 run_cli.py export -g KCNH2 -o data/exports/kcnh2.csv
+.venv/bin/python -m variantfeatures export -g KCNH2 -o data/exports/kcnh2.csv
 
 # Build (when data available)
-/usr/bin/python3 run_cli.py build -g KCNH2 --sources alphamissense,gnomad
+.venv/bin/python -m variantfeatures build -g KCNH2 --sources alphamissense,gnomad
 ```
