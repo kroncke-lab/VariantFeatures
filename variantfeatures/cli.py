@@ -402,8 +402,8 @@ def doctor(db: str):
     for p in problems:
         click.echo(f"  - {p}")
     click.echo("")
-    click.echo("See README.md > 'Local Data Storage' for setup, including the")
-    click.echo("collaborator path when you have no external volume.")
+    click.echo("Setup steps: README.md > 'On-Disk Storage' > 'Start here on a fresh")
+    click.echo("clone' — covers both supplying an existing database and building one.")
     raise SystemExit(1)
 
 
