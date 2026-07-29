@@ -6,8 +6,10 @@ dist/
 build/
 .eggs/
 
-# Data
-data/
+# Data. Slashless and anchored on purpose: locally `data` is an absolute symlink
+# to external storage, and a trailing-slash pattern matches directories only — it
+# would leave a recreated symlink showing as untracked in a fresh checkout.
+/data
 *.db
 *.sqlite
 *.tbi

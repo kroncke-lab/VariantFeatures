@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Iterator, Optional
 import urllib.request
 
+from ..local_storage import require_external_storage
+
 # Default cache location
 DEFAULT_CACHE_DIR = Path(__file__).parent.parent.parent / "data" / "alphamissense"
 
@@ -36,6 +38,7 @@ GENE_TO_UNIPROT = {
 def get_cache_path() -> Path:
     """Get the cache directory, creating if needed."""
     cache_dir = Path(os.environ.get("ALPHAMISSENSE_CACHE", DEFAULT_CACHE_DIR))
+    require_external_storage(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir
 

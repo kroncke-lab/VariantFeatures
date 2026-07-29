@@ -195,7 +195,27 @@ Categories:
 
 ## Execution
 
+On Brett's current workstation, VariantFeatures resolves `data/` and
+`annovar/humandb/` through absolute symlinks to
+`/Volumes/Ezekers/ResearchData/variantFeatures/data` and
+`/Volumes/Ezekers/ResearchData/variantFeatures/annovar/humandb`. Mount the APFS
+volume named `Ezekers` at `/Volumes/Ezekers`, then confirm both targets before
+running the VariantFeatures stage:
+
+```bash
+test -L data && test -d data
+test -L annovar/humandb && test -d annovar/humandb
+```
+
+Keep the workflow commands on their repo-relative paths. If the `data` link is
+missing or dangling, the run fails closed with mount instructions instead of
+building a second database on the internal disk (see AGENTS.md > "Local Data
+Storage"). Running ANNOVAR outside `scripts/full_gene_pipeline.sh` means setting
+`ANNOVAR_HOME` and `ANNOVAR_DB` together, since `ANNOVAR_DB` otherwise defaults
+to `$ANNOVAR_HOME/humandb`.
+
 ### Per-Gene Workflow
+
 ```bash
 # 1. Literature mining
 cd GeneVariantFetcher

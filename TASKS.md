@@ -27,6 +27,14 @@ enumerates canonical variants into `variants` + `variant_consequences`, queues
 family-specific normalized annotations, and can run available annotators. `export`
 now defaults to normalized wide/long output with explicit feature-family prefixes.
 
+**Local storage preflight:** On Brett's current workstation, `data/` and
+`annovar/humandb/` are symlinks to
+`/Volumes/Ezekers/ResearchData/variantFeatures/data` and
+`/Volumes/Ezekers/ResearchData/variantFeatures/annovar/humandb`. Mount the APFS
+volume named `Ezekers` at `/Volumes/Ezekers` and confirm both symlink targets
+exist before running any task that reads or writes these paths. Do not replace
+a broken link with a local directory.
+
 **Must-have fully populated genes:** APOE, MYBPC3, BRCA1, BRCA2, KCNH2, LDLR, additive
 to whatever genes are already present in `data/variants.db`. Use canonical
 `MYBPC3` for the cardiomyopathy gene; `MYPBC3` is a typo.

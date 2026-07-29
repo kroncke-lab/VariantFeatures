@@ -132,15 +132,46 @@ data now lives in the normalized `variants` + `variant_consequences` +
 
 ## On-Disk Storage
 
-VariantFeatures stores the built annotation database in a local SQLite file:
+VariantFeatures stores the built annotation database behind the stable
+repo-relative path:
 
 ```text
 data/variants.db
 ```
 
-The database file is ignored by git (`data/` and `*.db` are in `.gitignore`)
-because it is a generated data artifact. The current local snapshot is
-8,404,180,992 bytes, reported by `ls -lh` as 7.8G.
+On Brett's current macOS workstation, the large ignored data paths are
+absolute, local-only symlinks into the external APFS volume `Ezekers`:
+
+| Stable repo path | Physical storage |
+|---|---|
+| `data/` | `/Volumes/Ezekers/ResearchData/variantFeatures/data` |
+| `annovar/humandb/` | `/Volumes/Ezekers/ResearchData/variantFeatures/annovar/humandb` |
+
+Continue using `data/variants.db`, `data/<source>/`, and `annovar/humandb/` in
+commands; the symlinks preserve those interfaces. Before a build, import,
+export, or database job, verify that both the links and their targets are
+available:
+
+```bash
+test -L data && test -d data
+test -L annovar/humandb && test -d annovar/humandb
+```
+
+If a check fails, mount the volume at `/Volumes/Ezekers`. Do not rename the
+volume, replace either broken symlink, or create a fallback local directory,
+because that would split generated data across disks. The database and source
+files remain ignored by Git (`/data` and `*.db` are in `.gitignore`; the `/data`
+rule is anchored and slashless on purpose, because a trailing-slash pattern
+matches directories only and would leave a recreated symlink untracked). The
+symlinks are untracked and must be recreated in a fresh checkout on this
+workstation after verifying both external targets. At the 2026-07-28 storage
+migration, `variants.db` was 37,995,737,088 bytes (about 35.4 GiB).
+
+Splitting data across disks is also blocked in code: if the `data` link is
+missing or dangling, `variantfeatures/local_storage.py` refuses the write rather
+than letting `mkdir` create a second database on the internal disk. Set
+`VARIANTFEATURES_ALLOW_LOCAL_DATA=1` to use plain local storage on a machine
+with no external volume.
 
 The normalized schema separates variant identity, aliases, transcript effects,
 and annotation features:

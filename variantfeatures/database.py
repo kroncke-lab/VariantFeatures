@@ -4,6 +4,8 @@ import sqlite3
 from pathlib import Path
 from typing import Iterable, Optional, Literal
 
+from .local_storage import require_external_storage
+
 DEFAULT_DB = Path(__file__).parent.parent / "data" / "variants.db"
 
 SCHEMA = """
@@ -339,7 +341,10 @@ class VariantDB:
         initialize: bool = True,
         read_only: bool = False,
     ):
-        self.db_path = db_path or DEFAULT_DB
+        # Coerce before use: the guard below reads .parent on every path, including
+        # the read-only one that previously only interpolated db_path into a URI.
+        self.db_path = Path(db_path) if db_path else DEFAULT_DB
+        require_external_storage(self.db_path.parent)
         if read_only:
             self.conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
         else:

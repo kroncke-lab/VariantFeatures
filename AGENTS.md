@@ -61,7 +61,64 @@ VariantFeatures/
 └── PIPELINE.md              # End-to-end workflow
 ```
 
+## Local Data Storage
+
+On Brett's current workstation, the large ignored datasets are backed by the
+external APFS volume named `Ezekers`:
+
+| Stable repo path | Physical storage |
+|---|---|
+| `data/` | `/Volumes/Ezekers/ResearchData/variantFeatures/data` |
+| `annovar/humandb/` | `/Volumes/Ezekers/ResearchData/variantFeatures/annovar/humandb` |
+
+Both repo paths are absolute symlinks. Keep code and commands on the stable
+repo-relative paths (`data/variants.db`, `data/<source>/`, and
+`annovar/humandb/`). Before any build, import, export, or database job, run:
+
+```bash
+test -L data && test -d data
+test -L annovar/humandb && test -d annovar/humandb
+```
+
+If a check fails, mount `Ezekers` at `/Volumes/Ezekers`; do not rename the
+volume, replace either broken symlink, or create a fallback local directory.
+The symlinks are intentionally local-only and untracked, so a fresh checkout
+needs them recreated after both external targets have been verified.
+
+`.gitignore` ignores `data` with an anchored, slashless `/data` rule. That form
+matters: a trailing-slash `data/` pattern matches directories only, so a
+recreated symlink would show up as untracked in a fresh clone.
+
+### The fail-closed guard
+
+`variantfeatures/local_storage.py` enforces the contract above in code, because
+a *missing* `data` link does not fail on its own — `mkdir(parents=True)` would
+happily create a real local `data/`, and the job would then build a second
+`variants.db` (or re-download a multi-GB TSV) onto the internal disk that no
+later job reads. `require_external_storage()` refuses that write instead, and is
+called from `VariantDB.__init__` and the AlphaMissense cache path.
+
+The guard only covers the repo-root `data/` tree; a `tmp_path` database or an
+explicit `--db` elsewhere passes straight through, so tests are unaffected. On a
+machine that genuinely has no external volume (CI, a collaborator's laptop), set
+`VARIANTFEATURES_ALLOW_LOCAL_DATA=1` to opt into plain local storage.
+
+### Direct ANNOVAR commands
+
+`scripts/full_gene_pipeline.sh` sets `ANNOVAR_HOME` and `ANNOVAR_DB` together so
+the binaries and `humandb` stay in step. Running ANNOVAR outside that script
+means setting both explicitly — `ANNOVAR_DB` defaults to `$ANNOVAR_HOME/humandb`,
+which is the symlinked path, so leaving it unset while pointing `ANNOVAR_HOME`
+somewhere else silently annotates against the wrong database:
+
+```bash
+ANNOVAR_HOME="$PWD/annovar" ANNOVAR_DB="$PWD/annovar/humandb" \
+  python -m variantfeatures annovar-run --db data/variants.db \
+    --build hg38 --protocols refGeneWithVer,clinvar_20240611 --operations g,f
+```
+
 ## Key Commands
+
 ```bash
 # Query variants
 python -m variantfeatures query --gene KCNH2
