@@ -9,7 +9,7 @@ from click.testing import CliRunner
 
 from variantfeatures import publish
 from variantfeatures.cli import main
-from variantfeatures.database import VariantDB
+from variantfeatures.database import SCHEMA_VERSION, VariantDB
 from variantfeatures.publish import build_manifest, export_gene_slice, upload
 from variantfeatures.publish import (
     GNOMAD_R4_EXOME_DATASET,
@@ -265,7 +265,9 @@ def test_build_manifest_includes_counts_and_artifact_hashes(monkeypatch, tmp_pat
 
     assert manifest["producer"] == "variantfeatures"
     assert manifest["git_sha"] == "abcdef123456"
-    assert manifest["schema_version"] is None
+    # `_read_schema_version` reads PRAGMA user_version, which VariantDB now stamps;
+    # this was None only because nothing wrote a version into the file.
+    assert manifest["schema_version"] == SCHEMA_VERSION
     assert manifest["genes"]["KCNH2"]["row_counts"]["variants"] == 2
     assert manifest["source_versions"]["pathogenicity"]
     artifact = manifest["artifacts"]["genes/KCNH2.db"]

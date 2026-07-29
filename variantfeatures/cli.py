@@ -13,10 +13,27 @@ from pathlib import Path
 
 import requests
 
-from .database import DEFAULT_DB, VariantDB
+from .database import DEFAULT_DB, SCHEMA_VERSION, SchemaVersionError, VariantDB
+from .local_storage import LocalStorageError
 
 
-@click.group()
+class _StorageAwareGroup(click.Group):
+    """Report storage and schema problems as a clean error, not a traceback.
+
+    An unmounted volume, an absent database, or a database at the wrong schema
+    version is an operator condition with a written remedy, so it should read
+    like `Error: ...` and exit non-zero rather than dumping a stack through
+    `VariantDB.__init__`.
+    """
+
+    def invoke(self, ctx):
+        try:
+            return super().invoke(ctx)
+        except (LocalStorageError, SchemaVersionError) as e:
+            raise click.ClickException(str(e)) from e
+
+
+@click.group(cls=_StorageAwareGroup)
 @click.version_option()
 def main():
     """Aggregate predictive features for genetic variants."""
@@ -288,6 +305,12 @@ def stats(db: str):
     _stats_normalized(vdb)
 
     click.echo(f"\nDatabase: {vdb.db_path}")
+    stamped = vdb.schema_version
+    click.echo(
+        f"Schema version: {stamped}"
+        if stamped
+        else f"Schema version: unstamped (adopted as {SCHEMA_VERSION})"
+    )
 
 
 def _stats_normalized(vdb: VariantDB) -> None:

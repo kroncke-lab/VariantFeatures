@@ -19,6 +19,7 @@ import os
 from pathlib import Path
 
 ALLOW_LOCAL_ENV = "VARIANTFEATURES_ALLOW_LOCAL_DATA"
+ALLOW_DB_CREATE_ENV = "VARIANTFEATURES_ALLOW_DB_CREATE"
 
 # Repo-relative paths that belong on external storage and must never be created.
 EXTERNAL_PATHS = ("data",)
@@ -40,6 +41,10 @@ _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
 class LocalStorageError(Exception):
     """Raised when a write would create local storage that belongs on an external volume."""
+
+
+class MissingDatabaseError(LocalStorageError):
+    """Raised when the expected database is absent and creating it would rebuild from scratch."""
 
 
 def local_storage_allowed() -> bool:
@@ -113,4 +118,58 @@ def require_external_storage(target: Path) -> None:
         f"{name}/ symlink if this is a fresh checkout), then retry. See "
         f"AGENTS.md > 'Local Data Storage'.\n"
         f"To use plain local storage on purpose, set {ALLOW_LOCAL_ENV}=1."
+    )
+
+
+def db_creation_allowed() -> bool:
+    """True when the operator has opted into building a database from scratch."""
+    return os.environ.get(ALLOW_DB_CREATE_ENV, "").strip().lower() in _TRUTHY
+
+
+def require_existing_database(db_path: Path) -> None:
+    """Refuse to conjure a new database where an existing one was expected.
+
+    The external-storage guard catches an unmounted volume, but not the case that
+    actually costs the most: the volume is mounted, `data/` resolves, and
+    `variants.db` simply is not there. `sqlite3.connect` creates the file,
+    `_init_schema` writes the schema, and the run starts re-enumerating and
+    re-annotating from zero — days of API calls to rebuild what already existed.
+
+    So an absent (or truncated, zero-byte) database inside the guarded tree is a
+    hard stop. Rebuilding from scratch stays possible, but has to be asked for.
+    Databases outside the guarded tree — a pytest ``tmp_path``, an explicit
+    ``--db`` elsewhere — are created as before.
+    """
+    if _guarded_root(db_path) is None or db_creation_allowed():
+        return
+
+    try:
+        exists = db_path.is_file()
+        size = db_path.stat().st_size if exists else 0
+    except OSError:
+        exists, size = False, 0
+
+    if exists and size > 0:
+        return
+
+    problem = (
+        f"{db_path} exists but is empty (0 bytes)"
+        if exists
+        else f"{db_path} does not exist"
+    )
+    raise MissingDatabaseError(
+        f"refusing to build a database from scratch — {problem}.\n"
+        f"\n"
+        f"Creating it here would start a full re-enumeration and re-annotation "
+        f"rather than reading the database that already exists, so this stops "
+        f"instead. Likely causes: the external volume is mounted but empty, this "
+        f"is a different machine, or the database was moved or removed.\n"
+        f"\n"
+        f"Confirm the volume 'Ezekers' is mounted at /Volumes/Ezekers and holds "
+        f"the database:\n"
+        f"    ls -l data/variants.db\n"
+        f"\n"
+        f"To build from scratch on purpose (a genuine first build, or a "
+        f"collaborator starting fresh), opt in explicitly:\n"
+        f"    {ALLOW_DB_CREATE_ENV}=1 python -m variantfeatures build --gene KCNH2"
     )

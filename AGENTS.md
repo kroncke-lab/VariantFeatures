@@ -89,19 +89,60 @@ needs them recreated after both external targets have been verified.
 matters: a trailing-slash `data/` pattern matches directories only, so a
 recreated symlink would show up as untracked in a fresh clone.
 
-### The fail-closed guard
+### Fail-closed guards
 
-`variantfeatures/local_storage.py` enforces the contract above in code, because
-a *missing* `data` link does not fail on its own — `mkdir(parents=True)` would
-happily create a real local `data/`, and the job would then build a second
-`variants.db` (or re-download a multi-GB TSV) onto the internal disk that no
-later job reads. `require_external_storage()` refuses that write instead, and is
-called from `VariantDB.__init__` and the AlphaMissense cache path.
+`variantfeatures/local_storage.py` enforces the contract above in code. **Nothing
+here ever rebuilds silently — a run stops with a written remedy instead.** Both
+guards run from `VariantDB.__init__`, and `variantfeatures` reports them as
+`Error: ...` with exit 1 rather than a traceback.
 
-The guard only covers the repo-root `data/` tree; a `tmp_path` database or an
-explicit `--db` elsewhere passes straight through, so tests are unaffected. On a
-machine that genuinely has no external volume (CI, a collaborator's laptop), set
-`VARIANTFEATURES_ALLOW_LOCAL_DATA=1` to opt into plain local storage.
+1. **`require_external_storage()` — the link is broken.** A *missing* `data` link
+   does not fail on its own: `mkdir(parents=True)` would create a real local
+   `data/`, and the job would build a second `variants.db` (or re-download a
+   multi-GB TSV) onto the internal disk that no later job reads. Also called from
+   the AlphaMissense cache path. Override: `VARIANTFEATURES_ALLOW_LOCAL_DATA=1`.
+
+2. **`require_existing_database()` — the link is fine but the database is gone.**
+   This is the expensive case the first guard cannot see: the volume is mounted,
+   `data/` resolves, and `variants.db` simply is not there. `sqlite3.connect`
+   would create it, `_init_schema` would write the schema, and the run would
+   re-enumerate and re-annotate from zero — days of API calls to rebuild what
+   already existed. An absent *or* zero-byte database is a hard stop, on read and
+   write paths alike. Override: `VARIANTFEATURES_ALLOW_DB_CREATE=1`.
+
+Rebuilding from scratch stays possible — it just has to be asked for:
+
+```bash
+VARIANTFEATURES_ALLOW_DB_CREATE=1 python -m variantfeatures build --gene KCNH2
+```
+
+Both guards only cover the repo-root `data/` tree; a `tmp_path` database or an
+explicit `--db` elsewhere passes straight through, so tests and ad-hoc scratch
+databases are unaffected.
+
+### Schema version
+
+`SCHEMA_VERSION` in `variantfeatures/database.py` is stamped into
+`PRAGMA user_version` by `_init_schema`, and checked on every open before any
+caller can query. Bump it whenever a change to `SCHEMA` makes an older database
+unreadable, and add the matching migration.
+
+| Stamped version | Behaviour |
+|---|---|
+| equal to `SCHEMA_VERSION` | opens normally |
+| greater | refused — the file was written by newer code |
+| non-zero and lower | refused — a migration is required |
+| `0` (never stamped) | adopted **if** its tables match the normalized shape; refused if it still carries `variants_missense` / `variants_lof` |
+
+The version-0 branch exists because the current `variants.db` predates stamping.
+It keeps opening, and gets stamped on the next write-path open. A database still
+holding the removed flat tables is refused rather than adopted — reading a
+pre-migration file as current would return confidently wrong answers instead of
+failing. `variantfeatures stats` prints the stamped version.
+
+This also fills in a field the publish pipeline already carried:
+`publish.py::_read_schema_version` reads `PRAGMA user_version` first, so gene
+manifests now ship `schema_version: 1` instead of `null`.
 
 ### Direct ANNOVAR commands
 

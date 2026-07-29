@@ -1,12 +1,24 @@
 """SQLite database operations for variant features."""
 
+import logging
 import sqlite3
 from pathlib import Path
 from typing import Iterable, Optional, Literal
 
-from .local_storage import require_external_storage
+from .local_storage import require_existing_database, require_external_storage
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_DB = Path(__file__).parent.parent / "data" / "variants.db"
+
+#: Stamped into ``PRAGMA user_version`` so a database carries the shape it was
+#: written with. Bump this whenever a change to SCHEMA makes an older database
+#: unreadable by this code, and add the corresponding migration.
+SCHEMA_VERSION = 1
+
+#: Tables from the old flat schema. A database still carrying them predates the
+#: normalized migration, so it must not be adopted as current.
+_PRE_NORMALIZED_TABLES = ("variants_missense", "variants_lof")
 
 SCHEMA = """
 -- Gene-level annotations (pLI, LOEUF for LOF interpretation)
@@ -331,9 +343,13 @@ CREATE INDEX IF NOT EXISTS idx_penetrance_gene ON penetrance_estimates(gene);
 """
 
 
+class SchemaVersionError(Exception):
+    """Raised when a database's schema version is not one this code can read."""
+
+
 class VariantDB:
     """SQLite database for variant features."""
-    
+
     def __init__(
         self,
         db_path: Optional[Path] = None,
@@ -345,17 +361,81 @@ class VariantDB:
         # the read-only one that previously only interpolated db_path into a URI.
         self.db_path = Path(db_path) if db_path else DEFAULT_DB
         require_external_storage(self.db_path.parent)
+        require_existing_database(self.db_path)
         if read_only:
             self.conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
         else:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
             self.conn = sqlite3.connect(self.db_path)
         self.conn.row_factory = sqlite3.Row
+        # Refuse an unreadable shape before any caller can query it. Runs before
+        # _init_schema so an existing database is judged on what it already holds,
+        # not on the CREATE TABLE IF NOT EXISTS statements about to run over it.
+        self._check_schema_version()
         if initialize:
             self._init_schema()
-    
+
+    def _table_names(self) -> set:
+        rows = self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+        return {row[0] for row in rows}
+
+    @property
+    def schema_version(self) -> int:
+        """The version stamped in the file; 0 means never stamped."""
+        return int(self.conn.execute("PRAGMA user_version").fetchone()[0])
+
+    def _check_schema_version(self) -> None:
+        """Refuse a database this code cannot read correctly.
+
+        Version 0 means "written before stamping existed". Such a database is
+        adopted only if its tables match the current normalized shape — if it
+        still carries the pre-normalized flat tables, reading it as current would
+        silently return wrong answers, so it is refused instead.
+        """
+        version = self.schema_version
+        if version == SCHEMA_VERSION:
+            return
+
+        tables = self._table_names()
+        if not tables:
+            return  # brand-new file; _init_schema will create and stamp it
+
+        if version > SCHEMA_VERSION:
+            raise SchemaVersionError(
+                f"{self.db_path} was written by a newer VariantFeatures "
+                f"(schema version {version}; this code reads {SCHEMA_VERSION}).\n"
+                f"Update this checkout rather than reading it with older code."
+            )
+        if version != 0:
+            raise SchemaVersionError(
+                f"{self.db_path} is at schema version {version}; this code reads "
+                f"{SCHEMA_VERSION}. A migration is required — do not let a build "
+                f"write into it, as that would mix two schemas in one file."
+            )
+
+        stale = sorted(t for t in _PRE_NORMALIZED_TABLES if t in tables)
+        if stale:
+            raise SchemaVersionError(
+                f"{self.db_path} predates the normalized schema — it still has "
+                f"{', '.join(stale)}, which this code no longer reads.\n"
+                f"This is a stale database, not a current one. Rebuild it or "
+                f"point --db at the migrated file."
+            )
+        # Unstamped but structurally current: adopt it. _init_schema stamps it on
+        # the next write-path open, so this only reports once per read-only run.
+        logger.info(
+            "%s has no schema version stamp; adopting it as version %s",
+            self.db_path,
+            SCHEMA_VERSION,
+        )
+
     def _init_schema(self):
         self.conn.executescript(SCHEMA)
+        # Stamp only after _check_schema_version has cleared this file: anything
+        # it would refuse never reaches here, so this can't mislabel a stale DB.
+        self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self.conn.commit()
     
     def upsert_gene(self, symbol: str, **features):

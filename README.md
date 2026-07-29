@@ -167,11 +167,14 @@ symlinks are untracked and must be recreated in a fresh checkout on this
 workstation after verifying both external targets. At the 2026-07-28 storage
 migration, `variants.db` was 37,995,737,088 bytes (about 35.4 GiB).
 
-Splitting data across disks is also blocked in code: if the `data` link is
-missing or dangling, `variantfeatures/local_storage.py` refuses the write rather
-than letting `mkdir` create a second database on the internal disk. Set
-`VARIANTFEATURES_ALLOW_LOCAL_DATA=1` to use plain local storage on a machine
-with no external volume.
+This is also enforced in code, so a run stops rather than quietly rebuilding.
+`variantfeatures/local_storage.py` refuses two conditions: the `data` link being
+missing or dangling (which would let `mkdir` create a second database on the
+internal disk), and the link resolving while `variants.db` is absent or zero
+bytes (which would re-enumerate and re-annotate from zero). Both surface as
+`Error: ...` with exit 1. To use plain local storage on a machine with no
+external volume, set `VARIANTFEATURES_ALLOW_LOCAL_DATA=1`; to build a database
+from scratch on purpose, set `VARIANTFEATURES_ALLOW_DB_CREATE=1`.
 
 The normalized schema separates variant identity, aliases, transcript effects,
 and annotation features:

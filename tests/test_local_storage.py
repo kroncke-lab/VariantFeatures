@@ -18,9 +18,12 @@ import pytest
 from variantfeatures import local_storage
 from variantfeatures.database import VariantDB
 from variantfeatures.local_storage import (
+    ALLOW_DB_CREATE_ENV,
     ALLOW_LOCAL_ENV,
     LocalStorageError,
+    MissingDatabaseError,
     external_path_state,
+    require_existing_database,
     require_external_storage,
 )
 
@@ -30,7 +33,17 @@ def fake_repo(monkeypatch, tmp_path):
     """Repoint the guard's repo-root anchor at an empty tmp_path checkout."""
     monkeypatch.setattr(local_storage, "_ANCHORS", (tmp_path,))
     monkeypatch.delenv(ALLOW_LOCAL_ENV, raising=False)
+    monkeypatch.delenv(ALLOW_DB_CREATE_ENV, raising=False)
     return tmp_path
+
+
+@pytest.fixture
+def mounted_repo(fake_repo):
+    """A fake checkout whose `data` link resolves — the volume is mounted."""
+    target = fake_repo / "external"
+    target.mkdir()
+    (fake_repo / "data").symlink_to(target)
+    return fake_repo
 
 
 # ---------------------------------------------------------------------------
@@ -142,4 +155,101 @@ def test_variantdb_still_builds_a_database_outside_the_guarded_tree(tmp_path):
     db = VariantDB(tmp_path / "scratch" / "variants.db")
 
     assert db.db_path.exists()
+    db.conn.close()
+
+
+# ---------------------------------------------------------------------------
+# require_existing_database — the mounted-but-empty case
+# ---------------------------------------------------------------------------
+
+
+def test_missing_database_on_a_mounted_volume_is_refused(mounted_repo):
+    """The expensive case: `data/` resolves fine, `variants.db` simply is not there.
+
+    Nothing above catches this — the link is healthy — so without this guard
+    sqlite3 creates the file and the run re-annotates from zero.
+    """
+    db_path = mounted_repo / "data" / "variants.db"
+
+    with pytest.raises(MissingDatabaseError, match="does not exist"):
+        require_existing_database(db_path)
+
+    assert not db_path.exists(), "the guard must not create the database"
+
+
+def test_zero_byte_database_is_refused(mounted_repo):
+    """A truncated remnant would otherwise get a fresh schema written into it."""
+    db_path = mounted_repo / "data" / "variants.db"
+    db_path.touch()
+
+    with pytest.raises(MissingDatabaseError, match="empty"):
+        require_existing_database(db_path)
+
+
+def test_existing_database_passes(mounted_repo):
+    db_path = mounted_repo / "data" / "variants.db"
+    db_path.write_bytes(b"SQLite format 3\x00")
+
+    require_existing_database(db_path)
+
+
+def test_missing_database_error_explains_the_rebuild_and_the_opt_in(mounted_repo):
+    with pytest.raises(MissingDatabaseError) as excinfo:
+        require_existing_database(mounted_repo / "data" / "variants.db")
+
+    message = str(excinfo.value)
+    assert "from scratch" in message
+    assert ALLOW_DB_CREATE_ENV in message
+    assert "Ezekers" in message
+
+
+def test_databases_outside_the_guarded_tree_are_still_created(tmp_path):
+    require_existing_database(tmp_path / "scratch.db")
+
+
+def test_opt_in_allows_a_genuine_first_build(mounted_repo, monkeypatch):
+    """Brett or a collaborator rebuilding from scratch on purpose must still work."""
+    monkeypatch.setenv(ALLOW_DB_CREATE_ENV, "1")
+
+    require_existing_database(mounted_repo / "data" / "variants.db")
+
+
+@pytest.mark.parametrize("raw", ["0", "", "no", "maybe"])
+def test_opt_in_stays_closed_for_non_truthy_values(mounted_repo, monkeypatch, raw):
+    monkeypatch.setenv(ALLOW_DB_CREATE_ENV, raw)
+
+    with pytest.raises(MissingDatabaseError):
+        require_existing_database(mounted_repo / "data" / "variants.db")
+
+
+def test_variantdb_refuses_to_rebuild_a_missing_database_from_scratch(mounted_repo):
+    """The end-to-end shape of an accidental run: mounted volume, absent database."""
+    db_path = mounted_repo / "data" / "variants.db"
+
+    with pytest.raises(MissingDatabaseError):
+        VariantDB(db_path)
+
+    assert not db_path.exists()
+
+
+def test_variantdb_read_only_also_refuses_with_the_clear_error(mounted_repo):
+    """A read of an absent database should name the cause, not raise OperationalError."""
+    with pytest.raises(MissingDatabaseError):
+        VariantDB(mounted_repo / "data" / "variants.db", initialize=False, read_only=True)
+
+
+def test_variantdb_opens_an_existing_database_in_the_guarded_tree(mounted_repo):
+    """The normal mounted case must stay completely unaffected."""
+    # Build a real database outside the guarded tree, then move it into place, so
+    # the guarded path holds a genuine SQLite file rather than a stub.
+    seed_path = mounted_repo / "seed.db"
+    seed = VariantDB(seed_path)
+    seed.conn.close()
+    db_path = mounted_repo / "data" / "variants.db"
+    seed_path.rename(db_path)
+
+    db = VariantDB(db_path, initialize=False, read_only=True)
+
+    assert db.db_path == db_path
+    assert db.conn.execute("SELECT COUNT(*) FROM genes").fetchone()[0] == 0
     db.conn.close()
