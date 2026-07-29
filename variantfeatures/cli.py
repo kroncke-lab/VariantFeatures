@@ -14,7 +14,15 @@ from pathlib import Path
 import requests
 
 from .database import DEFAULT_DB, SCHEMA_VERSION, SchemaVersionError, VariantDB
-from .local_storage import LocalStorageError
+from .local_storage import (
+    ALLOW_DB_CREATE_ENV,
+    ALLOW_LOCAL_ENV,
+    LocalStorageError,
+    REPO_ROOT,
+    external_link_target,
+    external_path_state,
+    external_volume_name,
+)
 
 
 class _StorageAwareGroup(click.Group):
@@ -294,6 +302,109 @@ def _format_af(value) -> str:
         return f"{float(value):.2e}"
     except (TypeError, ValueError):
         return str(value)[:12]
+
+
+def _fmt_bytes(n: int) -> str:
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if n < 1024 or unit == "TiB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n} B"
+
+
+@main.command()
+@click.option("--db", type=click.Path(), default=None, help="Database path to check")
+def doctor(db: str):
+    """Report whether storage and the database are ready to use.
+
+    Read-only and never raises: the point is to say what state things are in,
+    especially on a fresh clone where nothing is set up yet. Exits non-zero when
+    something needed is missing, so it can gate a script.
+    """
+    problems: list[str] = []
+    click.echo("VariantFeatures environment")
+    click.echo("=" * 60)
+    click.echo(f"Repo root:  {REPO_ROOT}")
+    click.echo(f"Python:     {sys.version.split()[0]}")
+    click.echo("")
+
+    click.echo("Storage")
+    for name in ("data", "annovar/humandb"):
+        state = external_path_state(name)
+        target = external_link_target(name)
+        via = f" -> {target}" if target else ""
+        if state == "linked":
+            click.echo(f"  ok       {name}{via}")
+        elif state == "dangling":
+            volume = external_volume_name(name)
+            detail = f"volume {volume!r} is not mounted" if volume else "target missing"
+            click.echo(f"  MISSING  {name}{via}  ({detail})")
+            problems.append(f"{name}: {detail}")
+        else:
+            click.echo(f"  absent   {name}  (not set up in this checkout)")
+            # annovar/humandb is optional: without it only the ANNOVAR source is off.
+            if name == "data":
+                problems.append(f"{name}: not set up in this checkout")
+    click.echo("")
+
+    click.echo("Database")
+    db_path = Path(db) if db else DEFAULT_DB
+    click.echo(f"  path     {db_path}")
+    if not db_path.is_file():
+        click.echo("  MISSING  no database file at that path")
+        problems.append("variants.db: not present")
+    else:
+        size = db_path.stat().st_size
+        if size == 0:
+            click.echo("  MISSING  file is empty (0 bytes)")
+            problems.append("variants.db: empty file")
+        else:
+            click.echo(f"  size     {_fmt_bytes(size)}")
+            try:
+                vdb = VariantDB(db_path, initialize=False, read_only=True)
+            except (LocalStorageError, SchemaVersionError) as e:
+                click.echo(f"  UNUSABLE {e}".splitlines()[0])
+                problems.append(f"variants.db: {str(e).splitlines()[0]}")
+            else:
+                try:
+                    stamped = vdb.schema_version
+                    click.echo(
+                        f"  schema   version {stamped}"
+                        if stamped
+                        else f"  schema   unstamped (adopted as {SCHEMA_VERSION})"
+                    )
+                    n = vdb.conn.execute("SELECT COUNT(*) FROM variants").fetchone()[0]
+                    click.echo(f"  variants {n:,}")
+                    genes = vdb.conn.execute("SELECT COUNT(*) FROM genes").fetchone()[0]
+                    click.echo(f"  genes    {genes:,}")
+                finally:
+                    vdb.conn.close()
+    click.echo("")
+
+    click.echo("Overrides in effect")
+    any_override = False
+    for env, effect in (
+        (ALLOW_LOCAL_ENV, "plain local storage is permitted"),
+        (ALLOW_DB_CREATE_ENV, "building a database from scratch is permitted"),
+    ):
+        raw = os.environ.get(env)
+        if raw:
+            click.echo(f"  {env}={raw}  ({effect})")
+            any_override = True
+    if not any_override:
+        click.echo("  none")
+    click.echo("")
+
+    if not problems:
+        click.echo("Ready.")
+        return
+    click.echo(f"Not ready — {len(problems)} thing(s) to fix:")
+    for p in problems:
+        click.echo(f"  - {p}")
+    click.echo("")
+    click.echo("See README.md > 'Local Data Storage' for setup, including the")
+    click.echo("collaborator path when you have no external volume.")
+    raise SystemExit(1)
 
 
 @main.command()

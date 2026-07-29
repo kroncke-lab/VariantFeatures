@@ -89,12 +89,29 @@ needs them recreated after both external targets have been verified.
 matters: a trailing-slash `data/` pattern matches directories only, so a
 recreated symlink would show up as untracked in a fresh clone.
 
+### Checking state
+
+```bash
+python -m variantfeatures doctor
+```
+
+Reports `data/`, `annovar/humandb/`, and the database (size, schema version,
+variant/gene counts), plus any override env vars in effect. Read-only, never
+raises, exits non-zero when the checkout is not ready — so it doubles as a script
+gate. Run it first when anything storage-related looks wrong.
+
 ### Fail-closed guards
 
 `variantfeatures/local_storage.py` enforces the contract above in code. **Nothing
 here ever rebuilds silently — a run stops with a written remedy instead.** Both
 guards run from `VariantDB.__init__`, and `variantfeatures` reports them as
 `Error: ...` with exit 1 rather than a traceback.
+
+Guidance is derived from the checkout, not hardcoded: a dangling link names *its
+own* volume (via `external_volume_name`), while a checkout with no link gets
+fresh-clone setup steps. Never reintroduce a hardcoded "Ezekers" into these
+messages — a collaborator told to mount a drive they have never heard of reads it
+as a broken repo instead of a normal first run.
 
 1. **`require_external_storage()` — the link is broken.** A *missing* `data` link
    does not fail on its own: `mkdir(parents=True)` would create a real local

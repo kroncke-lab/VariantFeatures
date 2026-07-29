@@ -139,6 +139,47 @@ repo-relative path:
 data/variants.db
 ```
 
+### Start here on a fresh clone
+
+`data/` is deliberately not in Git — the database is ~35 GiB. A fresh clone has
+no `data/` and no database, and every command that needs one **stops with an
+explanation instead of quietly rebuilding from scratch**. To see exactly what is
+and is not set up:
+
+```bash
+python -m variantfeatures doctor
+```
+
+It prints the state of `data/`, `annovar/humandb/`, and the database (size,
+schema version, variant and gene counts), lists anything that needs fixing, and
+exits non-zero when the checkout is not ready — so it also works as a script
+gate. Then pick the case you are in:
+
+**You have a copy of `variants.db`.** Point `data/` at wherever you keep it and
+put the database inside:
+
+```bash
+ln -s /path/to/your/storage data     # or: mkdir data
+```
+
+Use `mkdir data` only with `VARIANTFEATURES_ALLOW_LOCAL_DATA=1` set, which
+confirms you mean to keep multi-GB data on the internal disk.
+
+**You want to build one yourself.** This is hours to days per gene and makes a
+lot of external API calls, so it is opt-in rather than something a stray command
+can trigger:
+
+```bash
+VARIANTFEATURES_ALLOW_LOCAL_DATA=1 VARIANTFEATURES_ALLOW_DB_CREATE=1 \
+  python -m variantfeatures build --gene KCNH2
+```
+
+Run `doctor` again afterwards; it should report `Ready.`
+
+Guidance adapts to your checkout: if `data/` is a symlink to a volume that is not
+mounted, the error names *that* volume. If there is no `data/` at all, it gives
+the setup steps above rather than telling you to mount a drive you do not have.
+
 On Brett's current macOS workstation, the large ignored data paths are
 absolute, local-only symlinks into the external APFS volume `Ezekers`:
 

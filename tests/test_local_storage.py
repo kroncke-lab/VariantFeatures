@@ -82,7 +82,7 @@ def test_state_is_absent_on_a_fresh_checkout(fake_repo):
 
 def test_absent_link_is_refused(fake_repo):
     """The regression: a fresh checkout must not grow a local data/ tree."""
-    with pytest.raises(LocalStorageError, match="no 'data' entry"):
+    with pytest.raises(LocalStorageError, match="there is no data/ in the repo root"):
         require_external_storage(fake_repo / "data")
 
     assert not (fake_repo / "data").exists(), "the guard must not create anything"
@@ -95,13 +95,12 @@ def test_dangling_link_is_refused_with_the_mount_reason(fake_repo):
         require_external_storage(fake_repo / "data" / "alphamissense")
 
 
-def test_error_names_the_volume_and_the_escape_hatch(fake_repo):
+def test_error_offers_the_escape_hatch(fake_repo):
+    """Volume-specific vs fresh-clone wording is covered in test_doctor.py."""
     with pytest.raises(LocalStorageError) as excinfo:
         require_external_storage(fake_repo / "data")
 
-    message = str(excinfo.value)
-    assert "Ezekers" in message
-    assert ALLOW_LOCAL_ENV in message
+    assert ALLOW_LOCAL_ENV in str(excinfo.value)
 
 
 def test_nested_paths_under_a_mounted_link_pass(fake_repo):
@@ -198,9 +197,11 @@ def test_missing_database_error_explains_the_rebuild_and_the_opt_in(mounted_repo
         require_existing_database(mounted_repo / "data" / "variants.db")
 
     message = str(excinfo.value)
-    assert "from scratch" in message
+    assert "re-enumeration and re-annotation from zero" in message
     assert ALLOW_DB_CREATE_ENV in message
-    assert "Ezekers" in message
+    # `mounted_repo` links to plain local storage, so there is no volume to name —
+    # the message must not invent one. Volume wording is covered in test_doctor.py.
+    assert "Volumes" not in message
 
 
 def test_databases_outside_the_guarded_tree_are_still_created(tmp_path):

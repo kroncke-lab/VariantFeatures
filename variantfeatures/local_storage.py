@@ -24,6 +24,9 @@ ALLOW_DB_CREATE_ENV = "VARIANTFEATURES_ALLOW_DB_CREATE"
 # Repo-relative paths that belong on external storage and must never be created.
 EXTERNAL_PATHS = ("data",)
 
+#: The checkout this code belongs to, for reporting.
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
 # Both anchors for the same tree: the unresolved one matches how callers build
 # their paths (``DEFAULT_DB`` is anchored on a bare ``__file__``), the resolved
 # one matches the same location reached through a symlinked checkout.
@@ -31,7 +34,7 @@ _ANCHORS = tuple(
     dict.fromkeys(
         (
             Path(__file__).parent.parent,
-            Path(__file__).resolve().parent.parent,
+            REPO_ROOT,
         )
     )
 )
@@ -71,6 +74,63 @@ def external_path_state(name: str) -> str:
     return "absent"
 
 
+def external_link_target(name: str) -> Path | None:
+    """The symlink target of repo-relative ``name``, whether or not it resolves.
+
+    Read with ``os.readlink`` rather than ``resolve()`` so an unmounted volume
+    still reports where it was pointed — that string is what tells an operator
+    which drive to attach.
+    """
+    for anchor in _ANCHORS:
+        path = anchor / name
+        if path.is_symlink():
+            try:
+                return Path(os.readlink(path))
+            except OSError:
+                return None
+    return None
+
+
+def external_volume_name(name: str) -> str | None:
+    """The macOS volume a repo-relative link points into, e.g. ``Ezekers``.
+
+    Derived from the link itself rather than hardcoded, so this says the right
+    thing on a machine whose drive is named something else — and says nothing at
+    all on a collaborator's checkout that has no link to read.
+    """
+    target = external_link_target(name)
+    if target is None:
+        return None
+    parts = target.parts
+    try:
+        return parts[parts.index("Volumes") + 1]
+    except (ValueError, IndexError):
+        return None
+
+
+def _remedy_lines(name: str) -> list:
+    """Guidance for restoring ``name``, matched to what the checkout looks like.
+
+    A dangling link means a known drive is detached — say which one. Nothing to
+    read means a fresh clone, where telling someone to mount a volume they have
+    never heard of is worse than saying nothing: they need the setup path.
+    """
+    volume = external_volume_name(name)
+    if volume:
+        return [
+            f"Attach the volume {volume!r} and mount it at /Volumes/{volume}, then retry.",
+            f"The {name}/ symlink points at {external_link_target(name)}.",
+        ]
+    return [
+        f"This checkout has no {name}/ at all, which is the normal state of a "
+        f"fresh clone.",
+        "Set one up as either an absolute symlink to your own storage:",
+        f"    ln -s /path/to/your/storage {name}",
+        f"or a plain local directory, with {ALLOW_LOCAL_ENV}=1 set:",
+        f"    mkdir {name}",
+    ]
+
+
 def _guarded_root(target: Path) -> str | None:
     """Return the guarded repo-relative name containing ``target``, if any.
 
@@ -104,21 +164,21 @@ def require_external_storage(target: Path) -> None:
         return
 
     found = {
-        "absent": f"no {name!r} entry in the repo root at all",
-        "dangling": f"{name!r} is a symlink whose target is unreachable",
+        "absent": f"there is no {name}/ in the repo root",
+        "dangling": f"{name}/ is a symlink whose target is unreachable",
     }[state]
-    raise LocalStorageError(
-        f"refusing to create {target} — {found}.\n"
-        f"\n"
-        f"{name}/ is expected to be an absolute symlink to external storage, so "
-        f"creating it here would put a second copy on the internal disk that no "
-        f"later job reads.\n"
-        f"\n"
-        f"Mount the APFS volume 'Ezekers' at /Volumes/Ezekers (and recreate the "
-        f"{name}/ symlink if this is a fresh checkout), then retry. See "
-        f"AGENTS.md > 'Local Data Storage'.\n"
-        f"To use plain local storage on purpose, set {ALLOW_LOCAL_ENV}=1."
-    )
+    lines = [
+        f"cannot use {name}/ — {found}.",
+        "",
+        f"Refusing to create it, because {target} on the internal disk would be a "
+        f"second copy that no later job reads.",
+        "",
+        *_remedy_lines(name),
+        "",
+        "For the full picture of what is and is not set up:",
+        "    python -m variantfeatures doctor",
+    ]
+    raise LocalStorageError("\n".join(lines))
 
 
 def db_creation_allowed() -> bool:
@@ -157,19 +217,28 @@ def require_existing_database(db_path: Path) -> None:
         if exists
         else f"{db_path} does not exist"
     )
-    raise MissingDatabaseError(
-        f"refusing to build a database from scratch — {problem}.\n"
-        f"\n"
-        f"Creating it here would start a full re-enumeration and re-annotation "
-        f"rather than reading the database that already exists, so this stops "
-        f"instead. Likely causes: the external volume is mounted but empty, this "
-        f"is a different machine, or the database was moved or removed.\n"
-        f"\n"
-        f"Confirm the volume 'Ezekers' is mounted at /Volumes/Ezekers and holds "
-        f"the database:\n"
-        f"    ls -l data/variants.db\n"
-        f"\n"
-        f"To build from scratch on purpose (a genuine first build, or a "
-        f"collaborator starting fresh), opt in explicitly:\n"
-        f"    {ALLOW_DB_CREATE_ENV}=1 python -m variantfeatures build --gene KCNH2"
+    volume = external_volume_name("data")
+    where = (
+        f"The storage is reachable, so the database was moved, removed, or never "
+        f"copied onto the volume {volume!r}."
+        if volume
+        else "The storage is reachable — it just does not contain a database yet."
     )
+    lines = [
+        f"no database to read — {problem}.",
+        "",
+        f"{where} Refusing to create it here, because that would start a full "
+        f"re-enumeration and re-annotation from zero rather than reading the "
+        f"database it should have found.",
+        "",
+        "If you expect an existing database, put it in place first:",
+        "    ls -l data/variants.db",
+        "",
+        "If you are starting fresh and *want* to build one (this takes hours to "
+        "days per gene and makes many API calls), opt in explicitly:",
+        f"    {ALLOW_DB_CREATE_ENV}=1 python -m variantfeatures build --gene KCNH2",
+        "",
+        "For the full picture of what is and is not set up:",
+        "    python -m variantfeatures doctor",
+    ]
+    raise MissingDatabaseError("\n".join(lines))
